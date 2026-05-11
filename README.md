@@ -5,6 +5,10 @@ for researchers who want to attest computational results with the same
 cryptographic rigor financial-services and AI governance customers
 receive.
 
+**Live demo:** [verdifax.github.io/verdifax-sdk-r](https://verdifax.github.io/verdifax-sdk-r/)
+— the full R Markdown reference workflow rendered as a self-contained
+HTML page. No installation needed; just click.
+
 ## Install
 
 From a local clone (typical during early development):
