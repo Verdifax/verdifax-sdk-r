@@ -1,0 +1,203 @@
+---
+title: "Reproducible Research with Verdifax"
+author: "Your Lab"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    theme: readable
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  collapse = TRUE
+)
+```
+
+# Why attest a computational result?
+
+This R Markdown document shows how to take a small statistical analysis
+from *"it runs on my machine"* to **cryptographically attested,
+byte-identical on replay, bound to a declared environment fingerprint**.
+
+The Verdifax pipeline does three things that go beyond what you can
+do alone:
+
+1. **Canonical seal.** Your result is normalized (RFC 8785 JCS) and
+   hashed. Anyone with the same input, code, and declared environment
+   can independently recompute the hash and check it matches.
+2. **Reproducibility-context binding.** The orchestrator binds your
+   declared runtime fingerprint (R version, pinned packages, git SHA,
+   declared random seeds, platform, optional container hash) into the
+   audit bundle as **Category 6**. The seal covers your declaration —
+   not a guess.
+3. **Transparency-log anchoring.** On Rekor-anchored deployments,
+   every attestation publishes an immutable entry to the Sigstore
+   transparency log. Erasing or rewriting the record after the fact
+   is detectable.
+
+## What you need
+
+- A Verdifax API key — set `VERDIFAX_API_KEY` in your shell or
+  `.Renviron`.
+- The R SDK: `remotes::install_github("Verdifax/verdifax-sdk-r")`.
+
+```{r install, eval = FALSE}
+remotes::install_github("Verdifax/verdifax-sdk-r")
+```
+
+# 1. Set up a deterministic analysis
+
+We fit a logistic regression on a small synthetic dataset with a
+fixed seed. The model is intentionally trivial — the point is the
+attestation pattern, not the statistics.
+
+```{r model}
+library(jsonlite)
+
+set.seed(42)
+
+n <- 200
+x1 <- rnorm(n)
+x2 <- rnorm(n)
+x3 <- rnorm(n)
+logit_p <- -0.4 + 0.9 * x1 - 0.6 * x2 + 0.3 * x3
+y <- rbinom(n, 1, plogis(logit_p))
+
+fit <- glm(y ~ x1 + x2 + x3, family = binomial)
+
+result <- list(
+  coefficients = round(as.numeric(coef(fit)), 8),
+  coefficient_names = names(coef(fit)),
+  null_deviance = round(fit$null.deviance, 8),
+  residual_deviance = round(fit$deviance, 8),
+  n_obs = as.integer(n)
+)
+
+# Canonical JSON form for hashing — sorted keys, no whitespace.
+payload <- toJSON(result, auto_unbox = TRUE, digits = 8)
+cat(payload, "\n")
+```
+
+# 2. Capture the research environment
+
+`verdifax_capture_environment()` auto-detects the R runtime version,
+every package version returned by `installed.packages()`, the git
+commit SHA of the working directory (best-effort), the container image
+hash (best-effort on Linux), and a GOOS/GOARCH-style platform
+descriptor. You declare random seeds explicitly so the orchestrator
+records exactly which seeds you claimed.
+
+Auto-detection failures silently leave the field `NULL`. The
+orchestrator records `NULL` as *"not declared"* rather than fabricating
+a claim.
+
+```{r capture}
+library(verdifax)
+
+ctx <- verdifax_capture_environment(declared_seeds = list(R = 42))
+cat("runtime:       ", ctx$runtime_name, ctx$runtime_version, "\n")
+cat("platform:      ", ctx$platform, "\n")
+cat("git_commit_sha:", ctx$git_commit_sha %||% "(not detected)", "\n")
+cat("# pinned deps: ", length(ctx$pinned_dependencies), "\n")
+cat("declared seeds:", paste(ctx$random_seeds, collapse = ", "), "\n")
+cat("declared flag: ", ctx$declared, "\n")
+```
+
+```{r helper-op, include = FALSE}
+# Null-coalescing operator (used above for the cat() of git_commit_sha).
+`%||%` <- function(x, y) if (is.null(x)) y else x
+```
+
+# 3. Attest the result
+
+`verdifax_attest()` POSTs the payload to `/execute` and binds the
+reproducibility context into the Category-6 section of the audit
+bundle. The returned manifest carries the canonical `ManifestHash` —
+the cryptographic seal of this analysis.
+
+```{r attest, eval = nzchar(Sys.getenv("VERDIFAX_API_KEY"))}
+client <- verdifax_client()  # reads VERDIFAX_API_URL / VERDIFAX_API_KEY
+
+attestation <- verdifax_attest(
+  client = client,
+  payload = payload,
+  program_id = strrep("0", 64),       # registry-authorized program ID
+  route_id = "paper-figure-3",         # human-meaningful route label
+  registry_record_hash = strrep("0", 64),  # §0 record hash; demo placeholder
+  reproducibility_context = ctx
+)
+
+mh <- attestation$manifest$ManifestHash %||% attestation$manifest$manifest_hash
+cat("run_id:       ", attestation$run_id, "\n")
+cat("ManifestHash: ", mh, "\n")
+```
+
+# 4. Prove the pipeline is deterministic
+
+`verdifax_verify_determinism()` runs the same payload through the
+pipeline twice and reports whether both invocations produced
+byte-identical canonical manifest hashes. The `deterministic` flag is
+grounded on manifest-hash equality — the seal of the pipeline output.
+Bundle-hash differences (when surfaced) reflect server-observed timing
+variation and are labeled informational.
+
+```{r verify, eval = nzchar(Sys.getenv("VERDIFAX_API_KEY"))}
+det <- verdifax_verify_determinism(
+  client = client,
+  payload = payload,
+  program_id = strrep("0", 64),
+  route_id = "paper-figure-3-verify",
+  registry_record_hash = strrep("0", 64),
+  reproducibility_context = ctx
+)
+
+cat("deterministic:          ", det$deterministic, "\n")
+cat("first.manifest_hash:    ", det$first$manifest_hash, "\n")
+cat("second.manifest_hash:   ", det$second$manifest_hash, "\n")
+cat("manifest_hash_differs:  ", det$diff$manifest_hash_differs, "\n")
+cat("differing_fields (info):", paste(det$diff$differing_fields, collapse = ", "), "\n")
+stopifnot(isTRUE(det$deterministic))
+```
+
+# 5. Re-knit this document
+
+If you re-knit this document *without changing the input data, code,
+or declared environment*, the `ManifestHash` printed in section 3 will
+be **byte-identical** to the previous knit. That's the core
+reproducibility guarantee Verdifax delivers: the same scientific
+result always seals to the same cryptographic hash, and the seal is
+bound to your declared environment fingerprint.
+
+If anything *did* change — a package was bumped, a seed was different,
+the input data was perturbed — the hash will differ, and any reader,
+reviewer, or replicator will know.
+
+# What to do with the manifest hash
+
+- **Cite it in the paper.** Treat the manifest hash like a DOI for the
+  computational result — short, unambiguous, machine-checkable.
+- **Pin it in supplementary materials.** Reviewers can independently
+  recompute it if they have the same inputs and declared environment.
+- **Bind it to the artifact.** Sign your dataset or paper PDF over the
+  manifest hash so the link is non-repudiable.
+
+For audit-grade deployments, ask your administrator whether the
+instance is **Rekor-anchored** — that adds an immutable Sigstore
+transparency-log entry to every attestation, detectable to anyone
+auditing the log.
+
+# Session info
+
+The chunk below records, alongside this knit, the full session info as
+it would appear in a typical reproducibility appendix. Verdifax already
+captures the same information cryptographically in section 2, but
+including the human-readable form here is good hygiene.
+
+```{r sessioninfo}
+sessionInfo()
+```
