@@ -1,0 +1,7 @@
+# Auto-generated exports for the verdifax R package. Keep this file
+# in sync when adding or removing exported functions in R/verdifax.R.
+
+export(verdifax_attest)
+export(verdifax_capture_environment)
+export(verdifax_client)
+export(verdifax_verify_determinism)

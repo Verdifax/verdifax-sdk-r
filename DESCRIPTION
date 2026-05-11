@@ -1,0 +1,30 @@
+Package: verdifax
+Type: Package
+Title: Verdifax SDK and Reproducible-Research Toolkit
+Version: 0.1.0
+Authors@R: person("Verdifax", email = "team@verdifax.com", role = c("aut", "cre"))
+Description: R client for the Verdifax cryptographic attestation pipeline.
+    Provides three primary capabilities for computational research
+    reproducibility: (1) auto-capture of the current R environment
+    fingerprint (R version, installed packages with versions, git
+    commit SHA, platform, optional random seeds, Docker container ID);
+    (2) attestation of payloads via the Verdifax /execute REST API
+    with the captured environment bound into the audit bundle; and
+    (3) determinism verification via /execute/verify-determinism,
+    which runs the same payload twice and reports whether both
+    invocations produced byte-identical canonical manifest hashes.
+    Designed for researchers who want to attest computational results
+    with the same cryptographic rigor that financial-services and AI
+    governance customers receive.
+License: MIT + file LICENSE
+URL: https://verdifax.com, https://github.com/verdifax/verdifax-sdk-r
+BugReports: https://github.com/verdifax/verdifax-sdk-r/issues
+Encoding: UTF-8
+Depends:
+    R (>= 4.0.0)
+Imports:
+    httr2 (>= 1.0.0),
+    jsonlite (>= 1.8.0)
+Suggests:
+    testthat (>= 3.0.0)
+RoxygenNote: 7.3.0

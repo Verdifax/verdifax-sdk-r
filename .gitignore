@@ -1,0 +1,11 @@
+# R build artifacts
+*.Rcheck/
+.Rhistory
+.RData
+.Ruserdata
+
+# OS junk
+.DS_Store
+
+# Local environment
+.Renviron
