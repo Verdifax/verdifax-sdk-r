@@ -409,7 +409,7 @@ matches.</li>
 binds your declared runtime fingerprint (R version, pinned packages, git
 SHA, declared random seeds, platform, optional container hash) into the
 audit bundle as <strong>Category 6</strong>. The seal covers your
-declaration — not a guess.</li>
+declaration, not a guess.</li>
 <li><strong>Transparency-log anchoring.</strong> On Rekor-anchored
 deployments, every attestation publishes an immutable entry to the
 Sigstore transparency log. Erasing or rewriting the record after the
@@ -418,7 +418,7 @@ fact is detectable.</li>
 <div id="what-you-need" class="section level2">
 <h2>What you need</h2>
 <ul>
-<li>A Verdifax API key — set <code>VERDIFAX_API_KEY</code> in your shell
+<li>A Verdifax API key, set <code>VERDIFAX_API_KEY</code> in your shell
 or <code>.Renviron</code>.</li>
 <li>The R SDK:
 <code>remotes::install_github(&quot;Verdifax/verdifax-sdk-r&quot;)</code>.</li>
@@ -429,7 +429,7 @@ or <code>.Renviron</code>.</li>
 <div id="set-up-a-deterministic-analysis" class="section level1">
 <h1>1. Set up a deterministic analysis</h1>
 <p>We fit a logistic regression on a small synthetic dataset with a
-fixed seed. The model is intentionally trivial — the point is the
+fixed seed. The model is intentionally trivial, the point is the
 attestation pattern, not the statistics.</p>
 <pre class="r"><code>library(jsonlite)
 
@@ -452,7 +452,7 @@ result &lt;- list(
   n_obs = as.integer(n)
 )
 
-# Canonical JSON form for hashing — sorted keys, no whitespace.
+# Canonical JSON form for hashing, sorted keys, no whitespace.
 payload &lt;- toJSON(result, auto_unbox = TRUE, digits = 8)
 cat(payload, &quot;\n&quot;)
 ## {&quot;coefficients&quot;:[-0.49612716,0.95304452,-0.97136411,0.49254681],&quot;coefficient_names&quot;:[&quot;(Intercept)&quot;,&quot;x1&quot;,&quot;x2&quot;,&quot;x3&quot;],&quot;null_deviance&quot;:269.2046668,&quot;residual_deviance&quot;:209.28305963,&quot;n_obs&quot;:200}</code></pre>
@@ -490,7 +490,7 @@ cat(&quot;declared flag: &quot;, ctx$declared, &quot;\n&quot;)
 <p><code>verdifax_attest()</code> POSTs the payload to
 <code>/execute</code> and binds the reproducibility context into the
 Category-6 section of the audit bundle. The returned manifest carries
-the canonical <code>ManifestHash</code> — the cryptographic seal of this
+the canonical <code>ManifestHash</code>, the cryptographic seal of this
 analysis.</p>
 <pre class="r"><code>client &lt;- verdifax_client()  # reads VERDIFAX_API_URL / VERDIFAX_API_KEY
 
@@ -514,7 +514,7 @@ cat(&quot;ManifestHash: &quot;, mh, &quot;\n&quot;)
 <p><code>verdifax_verify_determinism()</code> runs the same payload
 through the pipeline twice and reports whether both invocations produced
 byte-identical canonical manifest hashes. The <code>deterministic</code>
-flag is grounded on manifest-hash equality — the seal of the pipeline
+flag is grounded on manifest-hash equality, the seal of the pipeline
 output. Bundle-hash differences (when surfaced) reflect server-observed
 timing variation and are labeled informational.</p>
 <pre class="r"><code>det &lt;- verdifax_verify_determinism(
@@ -547,15 +547,15 @@ previous knit. That’s the core reproducibility guarantee Verdifax
 delivers: the same scientific result always seals to the same
 cryptographic hash, and the seal is bound to your declared environment
 fingerprint.</p>
-<p>If anything <em>did</em> change — a package was bumped, a seed was
-different, the input data was perturbed — the hash will differ, and any
+<p>If anything <em>did</em> change, a package was bumped, a seed was
+different, the input data was perturbed, the hash will differ, and any
 reader, reviewer, or replicator will know.</p>
 </div>
 <div id="what-to-do-with-the-manifest-hash" class="section level1">
 <h1>What to do with the manifest hash</h1>
 <ul>
 <li><strong>Cite it in the paper.</strong> Treat the manifest hash like
-a DOI for the computational result — short, unambiguous,
+a DOI for the computational result, short, unambiguous,
 machine-checkable.</li>
 <li><strong>Pin it in supplementary materials.</strong> Reviewers can
 independently recompute it if they have the same inputs and declared
@@ -564,7 +564,7 @@ environment.</li>
 PDF over the manifest hash so the link is non-repudiable.</li>
 </ul>
 <p>For audit-grade deployments, ask your administrator whether the
-instance is <strong>Rekor-anchored</strong> — that adds an immutable
+instance is <strong>Rekor-anchored</strong>, that adds an immutable
 Sigstore transparency-log entry to every attestation, detectable to
 anyone auditing the log.</p>
 </div>

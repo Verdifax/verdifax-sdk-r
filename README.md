@@ -1,13 +1,9 @@
-# verdifax — R SDK and Reproducible-Research Toolkit
+# verdifax, R SDK and Reproducible-Research Toolkit
 
 R client for the Verdifax cryptographic attestation pipeline. Designed
 for researchers who want to attest computational results with the same
 cryptographic rigor financial-services and AI governance customers
 receive.
-
-**Live demo:** [verdifax.github.io/verdifax-sdk-r](https://verdifax.github.io/verdifax-sdk-r/)
-— the full R Markdown reference workflow rendered as a self-contained
-HTML page. No installation needed; just click.
 
 ## Install
 
@@ -84,18 +80,18 @@ rather than fabricating an environment claim.
 `verdifax_verify_determinism()` runs your payload through the
 pipeline twice and reports whether both invocations produced
 byte-identical canonical manifest hashes. The `deterministic` flag
-is grounded on **manifest hash** equality — the seal of the pipeline
+is grounded on **manifest hash** equality, the seal of the pipeline
 output. Bundle hash differences (when surfaced in
 `diff$differing_fields`) indicate server-observed timing variation
 and are labeled `(informational)`.
 
 ## Dependencies
 
-- `httr2 (>= 1.0.0)` — HTTP client
-- `jsonlite (>= 1.8.0)` — JSON serialization
+- `httr2 (>= 1.0.0)`, HTTP client
+- `jsonlite (>= 1.8.0)`, JSON serialization
 
 Both are available on CRAN.
 
 ## License
 
-MIT — see `LICENSE`.
+MIT, see `LICENSE`.

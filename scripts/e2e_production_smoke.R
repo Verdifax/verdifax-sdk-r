@@ -25,7 +25,7 @@ cat("Endpoint:", api_url, "\n\n")
 # Helper that prints the orchestrator's actual response body on HTTP
 # failures so we don't lose the diagnostic detail. Returns the value
 # of `expr` on success or NULL on failure (caller assigns the result
-# explicitly — avoids `<<-` aliasing of base-namespace bindings like
+# explicitly, avoids `<<-` aliasing of base-namespace bindings like
 # `det()`).
 .run_with_diag <- function(label, expr) {
   tryCatch(
@@ -48,13 +48,13 @@ cat("Endpoint:", api_url, "\n\n")
 
 client <- verdifax_client(base_url = api_url, api_key = api_key)
 
-# Step 1 — capture environment
+# Step 1, capture environment
 ctx <- verdifax_capture_environment(declared_seeds = list(rng = 42))
-cat("[1/3] capture_environment OK — runtime",
+cat("[1/3] capture_environment OK, runtime",
     ctx$runtime_name, ctx$runtime_version,
     "/ deps:", length(ctx$pinned_dependencies), "\n")
 
-# Step 2 — attest
+# Step 2, attest
 attest_res <- .run_with_diag("verdifax_attest", verdifax_attest(
   client = client,
   payload = "r-research-e2e-smoke",
@@ -65,9 +65,9 @@ attest_res <- .run_with_diag("verdifax_attest", verdifax_attest(
 ))
 if (is.null(attest_res)) stop("attest failed; see diagnostic above")
 mh <- attest_res$manifest$ManifestHash %||% attest_res$manifest$manifest_hash
-cat("[2/3] verdifax_attest OK — manifest_hash:", substr(mh, 1, 16), "...\n")
+cat("[2/3] verdifax_attest OK, manifest_hash:", substr(mh, 1, 16), "...\n")
 
-# Step 3 — determinism. (We use `determinism_res` rather than `det`
+# Step 3, determinism. (We use `determinism_res` rather than `det`
 # because `det` shadows base::det and confuses some scope tooling.)
 determinism_res <- .run_with_diag(
   "verdifax_verify_determinism",
@@ -81,7 +81,7 @@ determinism_res <- .run_with_diag(
   )
 )
 if (is.null(determinism_res)) stop("verify-determinism failed; see diagnostic above")
-cat("[3/3] verify_determinism — deterministic:",
+cat("[3/3] verify_determinism, deterministic:",
     determinism_res$deterministic, "\n")
 if (!isTRUE(determinism_res$deterministic)) {
   cat("  diff$differing_fields:\n")

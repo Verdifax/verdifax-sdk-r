@@ -1,5 +1,5 @@
 # Pure-function tests for verdifax_capture_environment() and
-# verdifax_client(). These don't hit the network — only verify the
+# verdifax_client(). These don't hit the network, only verify the
 # local-environment introspection logic.
 
 test_that("verdifax_capture_environment returns expected core fields", {

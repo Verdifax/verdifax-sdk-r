@@ -1,5 +1,5 @@
 # ----------------------------------------------------------------------------
-# verdifax — R SDK for the Verdifax cryptographic attestation pipeline
+# verdifax, R SDK for the Verdifax cryptographic attestation pipeline
 # ----------------------------------------------------------------------------
 #
 # Four exported functions:
@@ -172,7 +172,7 @@ verdifax_capture_environment <- function(declared_seeds = list(),
     !is.null(ctx$platform)
   )
 
-  # Drop NULL entries — jsonlite will skip them, but explicit removal
+  # Drop NULL entries, jsonlite will skip them, but explicit removal
   # makes the JSON shape match what the Python wrapper produces.
   ctx[!vapply(ctx, is.null, logical(1))]
 }
@@ -316,7 +316,7 @@ verdifax_attest <- function(client,
 #' comparison summary.
 #'
 #' The top-level `deterministic` flag is grounded on manifest hash
-#' equality — the canonical seal of the pipeline output. Bundle hash
+#' equality, the canonical seal of the pipeline output. Bundle hash
 #' differences are surfaced in `diff$differing_fields` as
 #' informational metadata (server-observed timing variation).
 #'
