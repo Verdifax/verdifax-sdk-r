@@ -1,0 +1,31 @@
+name: test
+
+# Runs the testthat suite (pure-function environment-capture and client
+# tests; no network access required) on every push and PR.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - name: Install dependencies
+        run: Rscript -e 'install.packages(c("httr2", "jsonlite", "testthat"))'
+
+      - name: Install package
+        run: R CMD INSTALL .
+
+      - name: Run tests
+        run: Rscript -e 'library(testthat); library(verdifax); test_dir("tests/testthat", stop_on_failure = TRUE)'
