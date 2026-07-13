@@ -144,10 +144,15 @@ verdifax_capture_environment <- function(declared_seeds = list(),
   seeds_list <- NULL
   if (length(declared_seeds) > 0) {
     keys <- sort(names(declared_seeds))
+    # USE.NAMES = FALSE: vapply over a character vector names its result
+    # by default. A named vector serializes as a JSON object (despite
+    # the I() wrapper applied later), which the orchestrator's Go
+    # []string field rejects; random_seeds must be an unnamed array.
     seeds_list <- vapply(
       keys,
       function(k) paste0(k, "=", as.character(declared_seeds[[k]])),
-      character(1)
+      character(1),
+      USE.NAMES = FALSE
     )
   }
 
