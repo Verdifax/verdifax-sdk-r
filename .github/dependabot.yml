@@ -1,0 +1,14 @@
+# Keeps the pinned GitHub Actions SHAs current, with the matching version
+# comment kept in sync. Dependabot has no R package ecosystem; the R
+# dependencies are declared with minimum versions in DESCRIPTION.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # One combined PR per week instead of one per action.
+    groups:
+      actions:
+        patterns:
+          - "*"

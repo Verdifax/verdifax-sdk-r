@@ -55,3 +55,10 @@ test_that("verdifax_client strips trailing slashes from base_url", {
   client <- verdifax_client(base_url = "http://example.com////")
   expect_equal(client$base_url, "http://example.com")
 })
+
+test_that("verdifax_client defaults to production and a 90-second timeout", {
+  Sys.unsetenv("VERDIFAX_API_URL")
+  client <- verdifax_client()
+  expect_equal(client$base_url, "https://api.verdifax.com")
+  expect_equal(client$timeout, 90)
+})

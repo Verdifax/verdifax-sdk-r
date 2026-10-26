@@ -44,8 +44,10 @@
 
 # ── Module-level constants ──────────────────────────────────────────────────
 
-.DEFAULT_BASE_URL <- "http://localhost:9090"
-.DEFAULT_TIMEOUT_SEC <- 30
+.DEFAULT_BASE_URL <- "https://api.verdifax.com"
+# A sealed run can take over 30 seconds when the public log is slow; the
+# Python, Node and Go SDKs wait 90 seconds, and so does this one.
+.DEFAULT_TIMEOUT_SEC <- 90
 
 
 # ── Client ──────────────────────────────────────────────────────────────────
@@ -54,11 +56,11 @@
 #'
 #' @param base_url Base URL of the Verdifax API. Falls back to the
 #'   environment variable `VERDIFAX_API_URL`, then to
-#'   `http://localhost:9090`. Trailing slashes are stripped.
+#'   `https://api.verdifax.com`. Trailing slashes are stripped.
 #' @param api_key Optional API key sent as the `X-Verdifax-Key`
 #'   header. Falls back to the environment variable
 #'   `VERDIFAX_API_KEY`.
-#' @param timeout Request timeout in seconds. Defaults to 30.
+#' @param timeout Request timeout in seconds. Defaults to 90.
 #'
 #' @return A list with named elements (`base_url`, `api_key`,
 #'   `timeout`) suitable to pass to `verdifax_attest()` or

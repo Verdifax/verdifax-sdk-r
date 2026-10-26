@@ -25,7 +25,8 @@ remotes::install_github("Verdifax/verdifax-sdk-r")
 library(verdifax)
 
 # 1. Construct a client (reads VERDIFAX_API_URL / VERDIFAX_API_KEY
-#    from environment by default)
+#    from environment; defaults to https://api.verdifax.com and a
+#    90-second request timeout)
 client <- verdifax_client()
 
 # 2. Auto-capture the current R research environment
