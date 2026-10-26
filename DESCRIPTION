@@ -1,7 +1,7 @@
 Package: verdifax
 Type: Package
 Title: Verdifax SDK and Reproducible-Research Toolkit
-Version: 0.1.1
+Version: 0.1.2
 Authors@R: person("Verdifax", email = "team@verdifax.com", role = c("aut", "cre"))
 Description: R client for the Verdifax cryptographic attestation pipeline.
     Provides three primary capabilities for computational research
