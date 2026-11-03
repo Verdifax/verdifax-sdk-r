@@ -287,7 +287,7 @@ verdifax_capture_environment <- function(declared_seeds = list(),
 #' @param reproducibility_context Optional list shaped like the
 #'   output of `verdifax_capture_environment()`. Bound into the
 #'   audit bundle's Category-6 section.
-#' @param ai_output_text Optional AI output text for AIVP-T4
+#' @param ai_output_text Optional AI output text for AIVP
 #'   governance.
 #'
 #' @return Parsed API response list with `ok`, `run_id`,
