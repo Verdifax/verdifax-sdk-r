@@ -3,5 +3,8 @@
 
 export(verdifax_attest)
 export(verdifax_capture_environment)
+export(verdifax_clear_request_key)
 export(verdifax_client)
+export(verdifax_generate_request_key)
+export(verdifax_register_request_key)
 export(verdifax_verify_determinism)

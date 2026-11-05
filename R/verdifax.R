@@ -2,9 +2,9 @@
 # verdifax, R SDK for the Verdifax cryptographic attestation pipeline
 # ----------------------------------------------------------------------------
 #
-# Four exported functions:
+# Seven exported functions:
 #
-#   verdifax_client(base_url, api_key, timeout)
+#   verdifax_client(base_url, api_key, timeout, signing_key)
 #     Construct a client handle. Reads VERDIFAX_API_URL and
 #     VERDIFAX_API_KEY from environment by default. The returned
 #     list is passed to verdifax_attest() and verdifax_verify_determinism().
@@ -34,6 +34,13 @@
 #     and returns a list with deterministic flag, both run records,
 #     and the comparison diff.
 #
+#   verdifax_generate_request_key()
+#     Create an Ed25519 key pair on this machine for request signing.
+#
+#   verdifax_register_request_key(client)
+#   verdifax_clear_request_key(client)
+#     Register the client's public key on its API key, or clear it.
+#
 # All failures from auto-detection are silently swallowed and the
 # corresponding field is left NULL. The orchestrator records NULL as
 # "not declared" rather than fabricating a claim.
@@ -41,6 +48,7 @@
 # Dependencies (declared in DESCRIPTION):
 #   httr2 (>= 1.0.0)
 #   jsonlite (>= 1.8.0)
+#   sodium (Suggests, needed only for request signing)
 
 # ── Module-level constants ──────────────────────────────────────────────────
 
@@ -48,6 +56,10 @@
 # A sealed run can take over 30 seconds when the public log is slow; the
 # Python, Node and Go SDKs wait 90 seconds, and so does this one.
 .DEFAULT_TIMEOUT_SEC <- 90
+.REQUEST_KEY_PATH <- "/keys/request-key"
+.REQUEST_SIGNATURE_FORM <- "verdifax.request.v1"
+.REQUEST_KEY_PROOF_FORM <- "verdifax.request-key.v1"
+.SIGNING_KEY_BYTES <- 32L
 
 
 # ── Client ──────────────────────────────────────────────────────────────────
@@ -61,15 +73,22 @@
 #'   header. Falls back to the environment variable
 #'   `VERDIFAX_API_KEY`.
 #' @param timeout Request timeout in seconds. Defaults to 90.
+#' @param signing_key Optional raw vector holding the 32 bytes of an
+#'   Ed25519 private key, from `verdifax_generate_request_key()`. When
+#'   set, `verdifax_attest()` and `verdifax_verify_determinism()` sign
+#'   their requests. Needs the `sodium` package. The key is never sent
+#'   to the server, and the returned list holds it only inside a
+#'   closure, so printing the client does not show it.
 #'
 #' @return A list with named elements (`base_url`, `api_key`,
-#'   `timeout`) suitable to pass to `verdifax_attest()` or
-#'   `verdifax_verify_determinism()`.
+#'   `timeout`, and `signer` when `signing_key` is set) suitable to
+#'   pass to `verdifax_attest()` or `verdifax_verify_determinism()`.
 #'
 #' @export
 verdifax_client <- function(base_url = NULL,
                             api_key = NULL,
-                            timeout = .DEFAULT_TIMEOUT_SEC) {
+                            timeout = .DEFAULT_TIMEOUT_SEC,
+                            signing_key = NULL) {
   resolved_url <- base_url %||% Sys.getenv("VERDIFAX_API_URL", unset = NA)
   if (is.na(resolved_url) || identical(resolved_url, "")) {
     resolved_url <- .DEFAULT_BASE_URL
@@ -81,11 +100,15 @@ verdifax_client <- function(base_url = NULL,
     resolved_key <- NULL
   }
 
-  list(
+  client <- list(
     base_url = resolved_url,
     api_key = resolved_key,
     timeout = as.numeric(timeout)
   )
+  if (!is.null(signing_key)) {
+    client$signer <- .request_signer(signing_key)
+  }
+  client
 }
 
 
@@ -246,10 +269,10 @@ verdifax_capture_environment <- function(declared_seeds = list(),
 
 # ── HTTP helpers ────────────────────────────────────────────────────────────
 
-.build_request <- function(client, path, body) {
+.build_request <- function(client, path, body, method = "POST") {
   req <- httr2::request(client$base_url)
   req <- httr2::req_url_path(req, path)
-  req <- httr2::req_method(req, "POST")
+  req <- httr2::req_method(req, method)
   req <- httr2::req_headers(
     req,
     "Content-Type" = "application/json",
@@ -261,7 +284,9 @@ verdifax_capture_environment <- function(declared_seeds = list(),
   if (!is.null(client$api_key)) {
     req <- httr2::req_headers(req, "X-Verdifax-Key" = client$api_key)
   }
-  req <- httr2::req_body_json(req, body, auto_unbox = TRUE)
+  if (!is.null(body)) {
+    req <- httr2::req_body_json(req, body, auto_unbox = TRUE)
+  }
   req <- httr2::req_timeout(req, client$timeout)
   req
 }
@@ -309,7 +334,7 @@ verdifax_attest <- function(client,
     reproducibility_context = reproducibility_context,
     ai_output_text = ai_output_text
   )
-  req <- .build_request(client, "/execute", body)
+  req <- .build_request(client, "/execute", .attach_signature(client, body))
   .perform(req)
 }
 
@@ -348,8 +373,183 @@ verdifax_verify_determinism <- function(client,
     reproducibility_context = reproducibility_context,
     ai_output_text = ai_output_text
   )
-  req <- .build_request(client, "/execute/verify-determinism", body)
+  req <- .build_request(
+    client,
+    "/execute/verify-determinism",
+    .attach_signature(client, body)
+  )
   .perform(req)
+}
+
+
+# ── Request signing ─────────────────────────────────────────────────────────
+
+#' Create an Ed25519 key pair for request signing.
+#'
+#' The key pair is made on this machine and nothing is sent to the
+#' server. Pass `private_key` as `signing_key` to `verdifax_client()`,
+#' and store it as a secret. Needs the `sodium` package.
+#'
+#' @return A list with raw vectors `public_key` (32 bytes) and
+#'   `private_key` (32 bytes).
+#'
+#' @export
+verdifax_generate_request_key <- function() {
+  .require_sodium()
+  private_key <- sodium::random(.SIGNING_KEY_BYTES)
+  list(
+    public_key = sodium::sig_pubkey(sodium::sig_keygen(private_key)),
+    private_key = private_key
+  )
+}
+
+#' Register the client's public key on its API key.
+#'
+#' Sends the public key with a proof that this client holds the
+#' private key. From then on the server refuses a run on this API key
+#' without a request signature.
+#'
+#' @param client A client handle from `verdifax_client()`, constructed
+#'   with `signing_key`.
+#'
+#' @return Parsed API response list with `ok` and `public_key`.
+#'
+#' @export
+verdifax_register_request_key <- function(client) {
+  if (is.null(client$signer)) {
+    stop(
+      "verdifax_register_request_key needs a client with signing_key",
+      call. = FALSE
+    )
+  }
+  body <- .request_key_body(client$signer)
+  .perform(.build_request(client, .REQUEST_KEY_PATH, body))
+}
+
+#' Clear the registered public key.
+#'
+#' The server stops requiring request signatures on this API key.
+#'
+#' @param client A client handle from `verdifax_client()`.
+#'
+#' @return Parsed API response list with `ok`.
+#'
+#' @export
+verdifax_clear_request_key <- function(client) {
+  .perform(.build_request(client, .REQUEST_KEY_PATH, NULL, method = "DELETE"))
+}
+
+.sodium_available <- function() {
+  requireNamespace("sodium", quietly = TRUE)
+}
+
+.require_sodium <- function() {
+  if (!.sodium_available()) {
+    stop(
+      "request signing needs the sodium package: install.packages(\"sodium\")",
+      call. = FALSE
+    )
+  }
+  invisible(TRUE)
+}
+
+# The key stays inside these closures, so printing the client shows
+# no key bytes. sodium::sig_sign() takes the 64-byte form that
+# sig_keygen() builds from the 32 raw bytes.
+.request_signer <- function(signing_key) {
+  if (!is.raw(signing_key) || length(signing_key) != .SIGNING_KEY_BYTES) {
+    stop(
+      "signing_key must be the 32 raw bytes of an Ed25519 private key",
+      call. = FALSE
+    )
+  }
+  .require_sodium()
+  expanded <- sodium::sig_keygen(signing_key)
+  list(
+    public_key = sodium::sig_pubkey(expanded),
+    sign = function(message) sodium::sig_sign(message, expanded)
+  )
+}
+
+# The string as the server will decode it: put through the JSON
+# encoding req_body_json() uses, so the locale and the string's
+# declared encoding cannot make the signed bytes differ from the sent
+# ones.
+.wire_string <- function(value) {
+  json <- jsonlite::toJSON(list(value = value), auto_unbox = TRUE)
+  decoded <- jsonlite::fromJSON(json, simplifyVector = FALSE)[["value"]]
+  if (!is.character(decoded) || length(decoded) != 1) {
+    stop("request values must be single strings to be signed", call. = FALSE)
+  }
+  decoded
+}
+
+# jsonlite::base64_enc() wraps its output at 72 characters.
+.base64 <- function(bytes) {
+  gsub("\n", "", jsonlite::base64_enc(bytes), fixed = TRUE)
+}
+
+.utf8_bytes <- function(value) {
+  charToRaw(enc2utf8(value))
+}
+
+# Fields joined with single zero bytes. R strings cannot hold one, so
+# this works on raw vectors.
+.join_with_zero <- function(fields) {
+  Reduce(function(a, b) c(a, as.raw(0), b), lapply(fields, .utf8_bytes))
+}
+
+# The server hashes payload_text when it is non-empty, otherwise the
+# payload string exactly as sent. It does not base64-decode it. The
+# lookups use [[ ]] because body$payload would partially match
+# payload_text.
+.payload_hash <- function(body) {
+  payload <- body[["payload_text"]]
+  if (is.null(payload) || identical(payload, "")) {
+    payload <- body[["payload"]]
+  }
+  if (is.null(payload)) {
+    payload <- ""
+  }
+  sodium::bin2hex(sodium::sha256(.utf8_bytes(.wire_string(payload))))
+}
+
+.request_signature <- function(signer, body, signed_at = NULL, nonce = NULL) {
+  if (is.null(signed_at)) {
+    signed_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+  }
+  if (is.null(nonce)) {
+    nonce <- sodium::bin2hex(sodium::random(16))
+  }
+  preimage <- .join_with_zero(list(
+    .REQUEST_SIGNATURE_FORM,
+    .payload_hash(body),
+    .wire_string(body[["program_id"]]),
+    .wire_string(body[["route_id"]]),
+    .wire_string(body[["registry_record_hash"]]),
+    signed_at,
+    nonce
+  ))
+  list(
+    signature = .base64(signer$sign(preimage)),
+    signed_at = signed_at,
+    nonce = nonce
+  )
+}
+
+# With no signer the body is returned unchanged.
+.attach_signature <- function(client, body) {
+  if (is.null(client$signer)) {
+    return(body)
+  }
+  body$request_signature <- .request_signature(client$signer, body)
+  body
+}
+
+.request_key_body <- function(signer) {
+  public_key <- .base64(signer$public_key)
+  proof <- signer$sign(.join_with_zero(list(.REQUEST_KEY_PROOF_FORM, public_key)))
+  list(public_key = public_key, proof = .base64(proof))
 }
 
 

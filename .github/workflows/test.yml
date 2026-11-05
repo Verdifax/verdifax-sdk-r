@@ -23,10 +23,14 @@ jobs:
         with:
           r-version: "4.6.1"
 
+      - name: Install libsodium
+        # The sodium R package links against it. Request signing tests need it.
+        run: sudo apt-get update && sudo apt-get install -y libsodium-dev
+
       - name: Install dependencies
         # A dated Posit Package Manager snapshot fixes every package at its
         # version on that day, so CI cannot pick up a newer one.
-        run: Rscript -e 'options(repos = c(CRAN = "https://packagemanager.posit.co/cran/__linux__/noble/2026-10-25")); install.packages(c("httr2", "jsonlite", "testthat"))'
+        run: Rscript -e 'options(repos = c(CRAN = "https://packagemanager.posit.co/cran/__linux__/noble/2026-10-25")); install.packages(c("httr2", "jsonlite", "sodium", "testthat"))'
 
       - name: Install package
         run: R CMD INSTALL .

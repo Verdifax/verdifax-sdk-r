@@ -86,12 +86,46 @@ output. Bundle hash differences (when surfaced in
 `diff$differing_fields`) indicate server-observed timing variation
 and are labeled `(informational)`.
 
+## Request signing
+
+Request signing is optional. A client with no signing key sends the same requests as before.
+
+You can register an Ed25519 public key on your API key, so that each run must also be signed with a private key that only you hold. The key pair is created on your machine, and Verdifax receives only the public key. Signing needs the `sodium` package:
+
+```r
+install.packages("sodium")
+```
+
+```r
+# Run once, then store private_key as a secret. It is 32 raw bytes.
+keys <- verdifax_generate_request_key()
+
+client <- verdifax_client(signing_key = keys$private_key)
+verdifax_register_request_key(client) # sends the public key with its proof
+
+# verdifax_attest() and verdifax_verify_determinism() now sign.
+result <- verdifax_attest(
+  client = client,
+  payload = "my-analysis-output",
+  program_id = strrep("0", 64),
+  route_id = "paper-figure-3",
+  registry_record_hash = strrep("0", 64)
+)
+
+verdifax_clear_request_key(client) # stops requiring signatures on this API key
+```
+
+Registering a key changes that API key for every client that uses it: the server then refuses a run without a valid signature, so every caller on the key needs the private key. Each request carries the time and a fresh random nonce. The server refuses a repeated nonce and a time more than five minutes from its own clock.
+
+The signature shows the holder of the key requested the run. It does not show the key holder accepted the outcome.
+
 ## Dependencies
 
 - `httr2 (>= 1.0.0)`, HTTP client
 - `jsonlite (>= 1.8.0)`, JSON serialization
+- `sodium`, optional, needed only for request signing
 
-Both are available on CRAN.
+All are available on CRAN.
 
 ## License
 
