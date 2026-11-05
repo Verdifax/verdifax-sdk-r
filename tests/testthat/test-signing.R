@@ -122,7 +122,7 @@ test_that("shared vector: proof", {
 test_that("an unsigned client sends no request_signature and needs no sodium", {
   testthat::local_mocked_bindings(.sodium_available = function() FALSE, .package = "verdifax")
   client <- unsigned_client()
-  expect_named(client, c("base_url", "api_key", "timeout"))
+  expect_null(client$signer)
   sent <- capture_requests(attest(client, "hello"))
   expect_null(sent[[1]]$body$request_signature)
 })

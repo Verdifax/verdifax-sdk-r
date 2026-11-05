@@ -24,9 +24,9 @@ remotes::install_github("Verdifax/verdifax-sdk-r")
 ```r
 library(verdifax)
 
-# 1. Construct a client (reads VERDIFAX_API_URL / VERDIFAX_API_KEY
-#    from environment; defaults to https://api.verdifax.com and a
-#    90-second request timeout)
+# 1. Construct a client (reads VERDIFAX_BASE_URL, then VERDIFAX_API_URL,
+#    and VERDIFAX_API_KEY from environment; defaults to
+#    https://api.verdifax.com and a 90-second request timeout)
 client <- verdifax_client()
 
 # 2. Auto-capture the current R research environment
@@ -60,6 +60,137 @@ det <- verdifax_verify_determinism(
 stopifnot(det$deterministic)
 ```
 
+## Versioning
+
+From 1.0, a breaking change needs a new major version.
+
+## Settings
+
+| Setting | `verdifax_client()` argument | Environment variable | Default |
+|---------|------------------------------|----------------------|---------|
+| Base URL | `base_url` | `VERDIFAX_BASE_URL`, then `VERDIFAX_API_URL` | `https://api.verdifax.com` |
+| API key | `api_key` | `VERDIFAX_API_KEY` | none |
+| Timeout | `timeout`, in seconds | `VERDIFAX_TIMEOUT_MS` | 90 seconds |
+| User agent | `user_agent` | `VERDIFAX_USER_AGENT` | `verdifax-r/<version>` |
+| Retries | `max_retries` | `VERDIFAX_MAX_RETRIES` | 3 |
+| First retry delay | `retry_base_delay`, in seconds | none | 0.2 seconds |
+
+`verdifax_client()` reads the base URL and API key from the environment. `verdifax_from_env()` also reads the timeout, user agent and retry variables.
+
+GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 429, 502, 503 or 504, with exponential backoff and full jitter. POST is never retried.
+
+## Functions
+
+| Function | Endpoint |
+|----------|----------|
+| `verdifax_health()` | `GET /health` |
+| `verdifax_version()` | `GET /version` |
+| `verdifax_get_openapi()` | `GET /openapi.json` |
+| `verdifax_get_stats()` | `GET /stats` |
+| `verdifax_attest()` | `POST /execute` |
+| `verdifax_execute()` | `POST /execute` |
+| `verdifax_attest_claude_response()` | `POST /execute` |
+| `verdifax_attest_openai_response()` | `POST /execute` |
+| `verdifax_execute_batch()` | `POST /execute/batch` |
+| `verdifax_verify_determinism()` | `POST /execute/verify-determinism` |
+| `verdifax_get_run()` | `GET /runs/{id}` |
+| `verdifax_verify_run()` | `GET /runs/{id}/verify` |
+| `verdifax_list_runs()` | `GET /runs` |
+| `verdifax_search_runs()` | `GET /runs/search` |
+| `verdifax_export_runs()` | `GET /runs/export` |
+| `verdifax_export_runs_csv()` | `GET /runs/export?format=csv` |
+| `verdifax_get_run_artifacts()` | `GET /runs/{id}/artifacts` |
+| `verdifax_get_run_report()` | `GET /runs/{id}/report` |
+| `verdifax_download_audit_pdf()` | `GET /runs/{id}/report.pdf` |
+| `verdifax_get_allow_token()` | `GET /runs/{id}/allow-token` |
+| `verdifax_get_deny_receipt()` | `GET /runs/{id}/deny-receipt` |
+| `verdifax_get_ccv_halt_receipt()` | `GET /runs/{id}/ccv-halt-receipt` |
+| `verdifax_get_macc_halt_receipt()` | `GET /runs/{id}/macc-halt-receipt` |
+| `verdifax_get_aivp_t4_halt_receipt()` | `GET /runs/{id}/aivp-t4-halt-receipt` |
+| `verdifax_get_attestation_gap_receipt()` | `GET /runs/{id}/attestation-gap-receipt` |
+| `verdifax_get_ces_audit_record()` | `GET /runs/{id}/ces-audit-record` |
+| `verdifax_list_deletion_receipts()` | `GET /runs/{id}/deletion-receipts` |
+| `verdifax_list_attestations()` | `GET /attestations` |
+| `verdifax_get_attestation()` | `GET /attestations/{id}` |
+| `verdifax_get_public_bundle()` | `GET /runs/{id}/bundle.json` |
+| `verdifax_get_public_bundle_by_token()` | `GET /public/runs/{token}/bundle.json` |
+| `verdifax_dcae_verify()` | `POST /dcae/verify` |
+| `verdifax_register_request_key()` | `POST /keys/request-key` |
+| `verdifax_clear_request_key()` | `DELETE /keys/request-key` |
+| `verdifax_admin_create_key()` | `POST /admin/keys` |
+| `verdifax_admin_list_keys()` | `GET /admin/keys` |
+| `verdifax_admin_revoke_key()` | `DELETE /admin/keys/{id}` |
+| `verdifax_admin_erase()` | `POST /admin/erase` |
+
+These make no request: `verdifax_client()`, `verdifax_from_env()`, `verdifax_capture_environment()`, `verdifax_format_provider_payload()`, `verdifax_sign_request()`, `verdifax_request_key_registration_body()`, `verdifax_request_signature_preimage()`, `verdifax_generate_request_key()`, `verdifax_validate_hex64()`, `verdifax_validate_route_id()`, `verdifax_dse_dispatch_hash()`, `verdifax_dcae_closure_hash()`, `verdifax_cres_receipt_hash()` and `verdifax_run_statuses()`.
+
+`verdifax_get_run_artifacts()`, `verdifax_get_public_bundle()` and `verdifax_get_public_bundle_by_token()` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
+
+## Runs
+
+```r
+page <- verdifax_list_runs(client, limit = 50, offset = 0)
+one <- verdifax_get_run(client, page$runs[[1]]$id)
+found <- verdifax_search_runs(client, status = "ok", from = "2026-11-01T00:00:00Z")
+
+check <- verdifax_verify_run(client, result$run_id)
+```
+
+`verdifax_verify_run()` asks the server to recompute the manifest hash from the run's stored fields. `check$verified` is `TRUE` when it matches the recorded hash. It does not re-run the pipeline, and it is a check performed by Verdifax. For an independent offline check of the sealed audit bundle, use the open-source [`verdifax-verify`](https://github.com/Verdifax/verdifax-verify) CLI.
+
+## Batch runs
+
+`verdifax_execute_batch()` sends up to 1,000 runs in one request and stops with an error for more, before sending anything. Each row is a list with the argument names of `verdifax_attest()`. A row that fails comes back in `results` with `ok` set to `FALSE`, so the call does not stop for it.
+
+```r
+batch <- verdifax_execute_batch(client, list(
+  list(payload = "first", program_id = strrep("0", 64), route_id = "paper",
+       registry_record_hash = strrep("0", 64)),
+  list(payload = "second", program_id = strrep("0", 64), route_id = "paper",
+       registry_record_hash = strrep("0", 64))
+))
+
+for (row in batch$results) {
+  cat(row$index, row$ok, row$error, "\n")
+}
+```
+
+The client's `timeout` covers the whole batch, so raise it for a large one. A batch is one POST and it is never retried. After a timeout the server may have run some or all of the rows, so list your runs before you send them again.
+
+## Evidence export
+
+`verdifax_export_runs()` lists the runs the server holds for your key in a period, failures included, with up to 10,000 rows per export. `verdifax_export_runs_csv()` returns the same rows as raw CSV text.
+
+```r
+evidence <- verdifax_export_runs(
+  client, from = "2026-11-01T00:00:00Z", to = "2026-12-01T00:00:00Z"
+)
+evidence$total
+evidence$truncated
+
+export <- verdifax_export_runs_csv(
+  client, from = "2026-11-01T00:00:00Z", to = "2026-12-01T00:00:00Z"
+)
+if (export$truncated) {
+  warning("The CSV holds part of ", export$total, " runs. Use a narrower period.")
+}
+export$csv
+```
+
+The export states what the server stored, not a verdict. A call that never reached Verdifax cannot appear in it. Both forms say when a period holds more rows than the export returned: check `truncated`. `verdifax_export_runs_csv()` reads `total` and `truncated` from the `X-Verdifax-Total` and `X-Verdifax-Truncated` response headers, and stops with an error if the server does not send them. In the CSV, a `route_id` that a spreadsheet could read as a formula gets a leading `'`.
+
+## Provider helpers
+
+`verdifax_attest_claude_response()` and `verdifax_attest_openai_response()` attest a prompt and response as one payload: canonical JSON, exactly `{"prompt":...,"provider":...,"response":...}` with sorted keys and no extra whitespace, UTF-8, with `provider` set to `anthropic` or `openai`. `verdifax_format_provider_payload()` builds that text. All four Verdifax SDKs produce the same bytes.
+
+`govern` is `FALSE` by default. Set `govern = TRUE` to also send the response text as `ai_output_text` for the AIVP review, which runs on Anthropic in production. Without it, the AI output text is not sent for review.
+
+## Optional execute fields
+
+`verdifax_attest()`, `verdifax_execute()`, `verdifax_execute_batch()` and `verdifax_verify_determinism()` accept `attested_context`, `reproducibility_context`, `request_substance`, `authorization_chain`, `regulatory_scaffolding` and `causal_graph`. Each is recorded as supplied and Verdifax does not check it. Write a JSON array as an unnamed list, so that one item stays an array. The client derives `attested` and `declared` from the fields you provide. Leave out `request_substance$origin$source_ip_hash` and `user_agent_hash`: the server computes them. `verdifax_attest()`, `verdifax_execute()` and `verdifax_verify_determinism()` refuse them before sending, and a batch row that sets them fails in `results`.
+
+These functions check that `program_id` and `registry_record_hash` are 64 lowercase hex characters and that `route_id` is 1 to 256 printable ASCII characters.
+
 ## What `verdifax_capture_environment()` records
 
 | Field                  | Source                                    |
@@ -84,7 +215,8 @@ byte-identical canonical manifest hashes. The `deterministic` flag
 is grounded on **manifest hash** equality, the seal of the pipeline
 output. Bundle hash differences (when surfaced in
 `diff$differing_fields`) indicate server-observed timing variation
-and are labeled `(informational)`.
+and are labeled `(informational)`. Both runs are recorded, with the
+status `probe`.
 
 ## Request signing
 
@@ -103,7 +235,8 @@ keys <- verdifax_generate_request_key()
 client <- verdifax_client(signing_key = keys$private_key)
 verdifax_register_request_key(client) # sends the public key with its proof
 
-# verdifax_attest() and verdifax_verify_determinism() now sign.
+# verdifax_attest(), verdifax_execute_batch() and
+# verdifax_verify_determinism() now sign.
 result <- verdifax_attest(
   client = client,
   payload = "my-analysis-output",
@@ -117,12 +250,15 @@ verdifax_clear_request_key(client) # stops requiring signatures on this API key
 
 Registering a key changes that API key for every client that uses it: the server then refuses a run without a valid signature, so every caller on the key needs the private key. Each request carries the time and a fresh random nonce. The server refuses a repeated nonce and a time more than five minutes from its own clock.
 
+In a batch each row carries its own signature and nonce, and the server checks them as it reaches that row. A row refused for its signature comes back in `results`, so a repeated batch returns HTTP 200 with failed rows, and a row reached more than five minutes after it was signed fails the same way. A determinism check uses one signature for the request, and repeating it returns HTTP 403.
+
 The signature shows the holder of the key requested the run. It does not show the key holder accepted the outcome.
 
 ## Dependencies
 
-- `httr2 (>= 1.0.0)`, HTTP client
+- `httr2 (>= 1.1.0)`, HTTP client
 - `jsonlite (>= 1.8.0)`, JSON serialization
+- `openssl`, SHA-256 for the canonical hash functions
 - `sodium`, optional, needed only for request signing
 
 All are available on CRAN.

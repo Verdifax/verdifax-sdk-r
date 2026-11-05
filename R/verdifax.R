@@ -2,44 +2,11 @@
 # verdifax, R SDK for the Verdifax cryptographic attestation pipeline
 # ----------------------------------------------------------------------------
 #
-# Seven exported functions:
-#
-#   verdifax_client(base_url, api_key, timeout, signing_key)
-#     Construct a client handle. Reads VERDIFAX_API_URL and
-#     VERDIFAX_API_KEY from environment by default. The returned
-#     list is passed to verdifax_attest() and verdifax_verify_determinism().
-#
-#   verdifax_capture_environment(declared_seeds = list(),
-#                                include_dependencies = TRUE,
-#                                include_git = TRUE,
-#                                include_container = TRUE)
-#     Best-effort auto-detection of the current R runtime
-#     environment. Returns a list whose names match the orchestrator's
-#     ReproducibilityContext JSON contract (container_image_hash,
-#     runtime_name, runtime_version, pinned_dependencies,
-#     git_commit_sha, random_seeds, platform).
-#
-#   verdifax_attest(client, payload, program_id, route_id,
-#                   registry_record_hash,
-#                   reproducibility_context = NULL,
-#                   ai_output_text = NULL)
-#     Attest a payload via POST /execute and return the parsed
-#     response list (run_id, manifest_hash, etc.).
-#
-#   verdifax_verify_determinism(client, payload, program_id, route_id,
-#                               registry_record_hash,
-#                               reproducibility_context = NULL,
-#                               ai_output_text = NULL)
-#     Wrap POST /execute/verify-determinism. Runs the payload twice
-#     and returns a list with deterministic flag, both run records,
-#     and the comparison diff.
-#
-#   verdifax_generate_request_key()
-#     Create an Ed25519 key pair on this machine for request signing.
-#
-#   verdifax_register_request_key(client)
-#   verdifax_clear_request_key(client)
-#     Register the client's public key on its API key, or clear it.
+# This file holds the client, environment capture, attestation, the
+# determinism check and request signing. R/runs.R holds run retrieval,
+# evidence export and batch runs. R/routes.R holds every other route and
+# the provider and admin helpers. R/section0.R holds the canonical hash
+# formulas. README.md lists every exported function.
 #
 # All failures from auto-detection are silently swallowed and the
 # corresponding field is left NULL. The orchestrator records NULL as
@@ -60,6 +27,10 @@
 .REQUEST_SIGNATURE_FORM <- "verdifax.request.v1"
 .REQUEST_KEY_PROOF_FORM <- "verdifax.request-key.v1"
 .SIGNING_KEY_BYTES <- 32L
+.DEFAULT_MAX_RETRIES <- 3L
+.DEFAULT_RETRY_BASE_DELAY_SEC <- 0.2
+.RETRYABLE_METHODS <- c("GET", "HEAD", "OPTIONS")
+.RETRYABLE_STATUSES <- c(429L, 502L, 503L, 504L)
 
 
 # ── Client ──────────────────────────────────────────────────────────────────
@@ -67,18 +38,25 @@
 #' Construct a Verdifax client handle.
 #'
 #' @param base_url Base URL of the Verdifax API. Falls back to the
-#'   environment variable `VERDIFAX_API_URL`, then to
-#'   `https://api.verdifax.com`. Trailing slashes are stripped.
+#'   environment variable `VERDIFAX_BASE_URL`, then `VERDIFAX_API_URL`,
+#'   then to `https://api.verdifax.com`. Trailing slashes are stripped.
 #' @param api_key Optional API key sent as the `X-Verdifax-Key`
 #'   header. Falls back to the environment variable
 #'   `VERDIFAX_API_KEY`.
 #' @param timeout Request timeout in seconds. Defaults to 90.
 #' @param signing_key Optional raw vector holding the 32 bytes of an
 #'   Ed25519 private key, from `verdifax_generate_request_key()`. When
-#'   set, `verdifax_attest()` and `verdifax_verify_determinism()` sign
-#'   their requests. Needs the `sodium` package. The key is never sent
+#'   set, `verdifax_attest()`, `verdifax_execute()`,
+#'   `verdifax_execute_batch()`, `verdifax_verify_determinism()` and the
+#'   provider helpers sign their requests. Needs the `sodium` package. The key is never sent
 #'   to the server, and the returned list holds it only inside a
 #'   closure, so printing the client does not show it.
+#' @param user_agent Optional `User-Agent` value.
+#' @param max_retries Retries for GET, HEAD and OPTIONS after a network
+#'   failure or an HTTP 429, 502, 503 or 504. Defaults to 3; 0 turns them
+#'   off. POST is never retried.
+#' @param retry_base_delay First retry delay in seconds. It doubles each
+#'   retry, with full jitter. Defaults to 0.2.
 #'
 #' @return A list with named elements (`base_url`, `api_key`,
 #'   `timeout`, and `signer` when `signing_key` is set) suitable to
@@ -88,9 +66,12 @@
 verdifax_client <- function(base_url = NULL,
                             api_key = NULL,
                             timeout = .DEFAULT_TIMEOUT_SEC,
-                            signing_key = NULL) {
-  resolved_url <- base_url %||% Sys.getenv("VERDIFAX_API_URL", unset = NA)
-  if (is.na(resolved_url) || identical(resolved_url, "")) {
+                            signing_key = NULL,
+                            user_agent = NULL,
+                            max_retries = .DEFAULT_MAX_RETRIES,
+                            retry_base_delay = .DEFAULT_RETRY_BASE_DELAY_SEC) {
+  resolved_url <- base_url %||% .env_base_url()
+  if (is.null(resolved_url) || identical(resolved_url, "")) {
     resolved_url <- .DEFAULT_BASE_URL
   }
   resolved_url <- sub("/+$", "", resolved_url)
@@ -103,12 +84,27 @@ verdifax_client <- function(base_url = NULL,
   client <- list(
     base_url = resolved_url,
     api_key = resolved_key,
-    timeout = as.numeric(timeout)
+    timeout = as.numeric(timeout),
+    user_agent = user_agent,
+    max_retries = as.numeric(max_retries),
+    retry_base_delay = as.numeric(retry_base_delay)
   )
   if (!is.null(signing_key)) {
     client$signer <- .request_signer(signing_key)
   }
   client
+}
+
+
+# VERDIFAX_BASE_URL first, then VERDIFAX_API_URL.
+.env_base_url <- function() {
+  for (name in c("VERDIFAX_BASE_URL", "VERDIFAX_API_URL")) {
+    value <- Sys.getenv(name, unset = "")
+    if (nzchar(value)) {
+      return(value)
+    }
+  }
+  NULL
 }
 
 
@@ -269,15 +265,18 @@ verdifax_capture_environment <- function(declared_seeds = list(),
 
 # ── HTTP helpers ────────────────────────────────────────────────────────────
 
-.build_request <- function(client, path, body, method = "POST") {
+.build_request <- function(client, path, body, method = "POST", query = NULL) {
   req <- httr2::request(client$base_url)
   req <- httr2::req_url_path(req, path)
+  if (length(query) > 0) {
+    req <- do.call(httr2::req_url_query, c(list(req), query))
+  }
   req <- httr2::req_method(req, method)
   req <- httr2::req_headers(
     req,
     "Content-Type" = "application/json",
     "Accept" = "application/json",
-    "User-Agent" = paste0(
+    "User-Agent" = client$user_agent %||% paste0(
       "verdifax-r/", utils::packageVersion("verdifax")
     )
   )
@@ -288,7 +287,28 @@ verdifax_capture_environment <- function(declared_seeds = list(),
     req <- httr2::req_body_json(req, body, auto_unbox = TRUE)
   }
   req <- httr2::req_timeout(req, client$timeout)
-  req
+  .with_retries(client, req, method)
+}
+
+# GET, HEAD and OPTIONS retry after a network failure or a transient
+# status, with exponential backoff and full jitter, the same attempts and
+# backoff as the Node and Go SDKs. POST and DELETE are never retried:
+# replaying one could run it twice, and a retried signed request would be
+# refused as a replay.
+.with_retries <- function(client, req, method) {
+  retries <- client$max_retries %||% .DEFAULT_MAX_RETRIES
+  if (!method %in% .RETRYABLE_METHODS || retries <= 0) {
+    return(req)
+  }
+  base_delay <- client$retry_base_delay %||% .DEFAULT_RETRY_BASE_DELAY_SEC
+  httr2::req_retry(
+    req,
+    max_tries = retries + 1,
+    retry_on_failure = TRUE,
+    is_transient = function(resp) httr2::resp_status(resp) %in% .RETRYABLE_STATUSES,
+    backoff = function(attempt) stats::runif(1, 0, base_delay * 2^(attempt - 1)),
+    after = function(resp) NA
+  )
 }
 
 .perform <- function(req) {
@@ -296,6 +316,15 @@ verdifax_capture_environment <- function(declared_seeds = list(),
   body <- httr2::resp_body_string(resp)
   parsed <- jsonlite::fromJSON(body, simplifyVector = FALSE)
   parsed
+}
+
+# The server's own message, added to the httr2 error for a non-2xx
+# response. NULL when the body is not the JSON error envelope.
+.error_detail <- function(resp) {
+  tryCatch({
+    detail <- jsonlite::fromJSON(httr2::resp_body_string(resp), simplifyVector = FALSE)[["error"]]
+    if (is.character(detail) && length(detail) == 1) detail else NULL
+  }, error = function(e) NULL)
 }
 
 
@@ -314,6 +343,19 @@ verdifax_capture_environment <- function(declared_seeds = list(),
 #'   audit bundle's Category-6 section.
 #' @param ai_output_text Optional AI output text for AIVP
 #'   governance.
+#' @param attested_context Optional named list of caller-attested actor,
+#'   model and decision fields, recorded in the audit bundle. `attested`
+#'   is set from whether any other field has a value.
+#' @param request_substance Optional named list of prompt, output, cost,
+#'   latency and origin metadata, recorded as supplied. Leave out
+#'   `origin$source_ip_hash` and `origin$user_agent_hash`: the server
+#'   computes those, and they are refused here.
+#' @param authorization_chain Optional named list holding the approval
+#'   chain, recorded as supplied and not verified by Verdifax.
+#' @param regulatory_scaffolding Optional named list of regulatory
+#'   metadata, recorded as supplied and not an assessment by Verdifax.
+#' @param causal_graph Optional named list recording what led to this
+#'   run, recorded as supplied.
 #'
 #' @return Parsed API response list with `ok`, `run_id`,
 #'   `manifest`, etc.
@@ -325,14 +367,24 @@ verdifax_attest <- function(client,
                             route_id,
                             registry_record_hash,
                             reproducibility_context = NULL,
-                            ai_output_text = NULL) {
+                            ai_output_text = NULL,
+                            attested_context = NULL,
+                            request_substance = NULL,
+                            authorization_chain = NULL,
+                            regulatory_scaffolding = NULL,
+                            causal_graph = NULL) {
   body <- .build_execute_body(
     payload = payload,
     program_id = program_id,
     route_id = route_id,
     registry_record_hash = registry_record_hash,
     reproducibility_context = reproducibility_context,
-    ai_output_text = ai_output_text
+    ai_output_text = ai_output_text,
+    attested_context = attested_context,
+    request_substance = request_substance,
+    authorization_chain = authorization_chain,
+    regulatory_scaffolding = regulatory_scaffolding,
+    causal_graph = causal_graph
   )
   req <- .build_request(client, "/execute", .attach_signature(client, body))
   .perform(req)
@@ -352,6 +404,9 @@ verdifax_attest <- function(client,
 #' differences are surfaced in `diff$differing_fields` as
 #' informational metadata (server-observed timing variation).
 #'
+#' With a `signing_key`, one signature covers the request, and the
+#' server claims its nonce once.
+#'
 #' @inheritParams verdifax_attest
 #'
 #' @return Parsed API response list with `deterministic`, `first`,
@@ -364,14 +419,24 @@ verdifax_verify_determinism <- function(client,
                                         route_id,
                                         registry_record_hash,
                                         reproducibility_context = NULL,
-                                        ai_output_text = NULL) {
+                                        ai_output_text = NULL,
+                                        attested_context = NULL,
+                                        request_substance = NULL,
+                                        authorization_chain = NULL,
+                                        regulatory_scaffolding = NULL,
+                                        causal_graph = NULL) {
   body <- .build_execute_body(
     payload = payload,
     program_id = program_id,
     route_id = route_id,
     registry_record_hash = registry_record_hash,
     reproducibility_context = reproducibility_context,
-    ai_output_text = ai_output_text
+    ai_output_text = ai_output_text,
+    attested_context = attested_context,
+    request_substance = request_substance,
+    authorization_chain = authorization_chain,
+    regulatory_scaffolding = regulatory_scaffolding,
+    causal_graph = causal_graph
   )
   req <- .build_request(
     client,
@@ -560,13 +625,85 @@ verdifax_clear_request_key <- function(client) {
                                 route_id,
                                 registry_record_hash,
                                 reproducibility_context = NULL,
-                                ai_output_text = NULL) {
-  .validate_hex64(program_id, "program_id")
-  .validate_hex64(registry_record_hash, "registry_record_hash")
-  if (!nzchar(route_id)) {
-    stop("route_id must be a non-empty string")
+                                ai_output_text = NULL,
+                                attested_context = NULL,
+                                request_substance = NULL,
+                                authorization_chain = NULL,
+                                regulatory_scaffolding = NULL,
+                                causal_graph = NULL) {
+  verdifax_validate_hex64(program_id, "program_id")
+  verdifax_validate_hex64(registry_record_hash, "registry_record_hash")
+  verdifax_validate_route_id(route_id)
+  if (is.null(payload)) {
+    stop("payload must be character or raw")
   }
+  .refuse_origin_hashes(request_substance)
+  .execute_fields(
+    payload = payload,
+    program_id = program_id,
+    route_id = route_id,
+    registry_record_hash = registry_record_hash,
+    reproducibility_context = reproducibility_context,
+    ai_output_text = ai_output_text,
+    attested_context = attested_context,
+    request_substance = request_substance,
+    authorization_chain = authorization_chain,
+    regulatory_scaffolding = regulatory_scaffolding,
+    causal_graph = causal_graph
+  )
+}
 
+# The server computes these two fields and refuses a request that sets
+# them, on POST /execute and in each row of a batch.
+.refuse_origin_hashes <- function(substance) {
+  origin <- substance[["origin"]]
+  for (name in c("source_ip_hash", "user_agent_hash")) {
+    value <- origin[[name]]
+    if (!is.null(value) && !identical(value, "")) {
+      stop(
+        "request_substance$origin$source_ip_hash and user_agent_hash are ",
+        "computed by the server and cannot be supplied",
+        call. = FALSE
+      )
+    }
+  }
+  invisible(TRUE)
+}
+
+# A field counts as provided unless it is NULL, empty text or FALSE.
+.is_provided <- function(value) {
+  !is.null(value) && !identical(value, "") && !identical(value, FALSE)
+}
+
+# The attested flag follows the fields, in all four SDKs, so a policy
+# that reads the flag sees what the caller declared.
+.attested_block <- function(context) {
+  context <- context[!vapply(context, is.null, logical(1))]
+  fields <- context[setdiff(names(context), "attested")]
+  context$attested <- any(vapply(fields, .is_provided, logical(1)))
+  context
+}
+
+# The declared flag follows the fields in the same way. An empty vector
+# declares nothing.
+.declared_flag <- function(context) {
+  fields <- context[setdiff(names(context), "declared")]
+  any(vapply(fields, function(value) .is_provided(value) && length(value) > 0, logical(1)))
+}
+
+# The fields of one execute body, with no checks on their values, so a
+# batch can leave a bad row for the server to report in its result.
+.execute_fields <- function(payload,
+                            program_id,
+                            route_id,
+                            registry_record_hash,
+                            reproducibility_context = NULL,
+                            ai_output_text = NULL,
+                            attested_context = NULL,
+                            request_substance = NULL,
+                            authorization_chain = NULL,
+                            regulatory_scaffolding = NULL,
+                            causal_graph = NULL) {
   body <- list(
     program_id = program_id,
     route_id = route_id,
@@ -586,7 +723,7 @@ verdifax_clear_request_key <- function(client) {
     } else {
       body$payload <- jsonlite::base64_enc(payload)
     }
-  } else {
+  } else if (!is.null(payload)) {
     stop("payload must be character or raw")
   }
 
@@ -594,10 +731,15 @@ verdifax_clear_request_key <- function(client) {
     body$ai_output_text <- ai_output_text
   }
 
+  if (!is.null(attested_context)) {
+    body$attested_context <- .attested_block(attested_context)
+  }
+
   if (!is.null(reproducibility_context)) {
     # Filter NULL entries before sending; orchestrator handles
     # missing fields as "not declared".
     ctx <- reproducibility_context[!vapply(reproducibility_context, is.null, logical(1))]
+    ctx$declared <- .declared_flag(ctx)
     # Force array-valued fields to serialize as JSON arrays even at
     # length 1. Without I(), jsonlite's auto_unbox=TRUE would emit a
     # single-element character vector as a JSON scalar string, which
@@ -608,25 +750,16 @@ verdifax_clear_request_key <- function(client) {
         ctx[[array_field]] <- I(ctx[[array_field]])
       }
     }
-    if (length(ctx) > 0) {
-      body$reproducibility_context <- ctx
-    }
+    body$reproducibility_context <- ctx
   }
+
+  # A NULL block stays out of the list, so it stays off the wire.
+  body$request_substance <- request_substance
+  body$authorization_chain <- authorization_chain
+  body$regulatory_scaffolding <- regulatory_scaffolding
+  body$causal_graph <- causal_graph
 
   body
-}
-
-
-# ── Validation helpers ──────────────────────────────────────────────────────
-
-.validate_hex64 <- function(value, field_name) {
-  if (!is.character(value) || length(value) != 1 || is.na(value)) {
-    stop(field_name, " must be a non-NA character scalar")
-  }
-  if (nchar(value) != 64 || !grepl("^[0-9a-f]{64}$", tolower(value))) {
-    stop(field_name, " must be 64 lowercase hex characters")
-  }
-  invisible(TRUE)
 }
 
 
