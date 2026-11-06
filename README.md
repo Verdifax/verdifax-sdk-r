@@ -89,6 +89,7 @@ GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 42
 | `verdifax_get_stats()` | `GET /stats` |
 | `verdifax_attest()` | `POST /execute` |
 | `verdifax_execute()` | `POST /execute` |
+| `verdifax_job_step()` | `POST /execute` |
 | `verdifax_attest_claude_response()` | `POST /execute` |
 | `verdifax_attest_openai_response()` | `POST /execute` |
 | `verdifax_execute_batch()` | `POST /execute/batch` |
@@ -116,13 +117,15 @@ GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 42
 | `verdifax_get_public_bundle_by_token()` | `GET /public/runs/{token}/bundle.json` |
 | `verdifax_dcae_verify()` | `POST /dcae/verify` |
 | `verdifax_register_request_key()` | `POST /keys/request-key` |
+| `verdifax_rotate_request_key()` | `POST /keys/request-key` |
 | `verdifax_clear_request_key()` | `DELETE /keys/request-key` |
 | `verdifax_admin_create_key()` | `POST /admin/keys` |
 | `verdifax_admin_list_keys()` | `GET /admin/keys` |
 | `verdifax_admin_revoke_key()` | `DELETE /admin/keys/{id}` |
+| `verdifax_admin_clear_request_key()` | `DELETE /admin/keys/{id}/request-key` |
 | `verdifax_admin_erase()` | `POST /admin/erase` |
 
-These make no request: `verdifax_client()`, `verdifax_from_env()`, `verdifax_capture_environment()`, `verdifax_format_provider_payload()`, `verdifax_sign_request()`, `verdifax_request_key_registration_body()`, `verdifax_request_signature_preimage()`, `verdifax_generate_request_key()`, `verdifax_validate_hex64()`, `verdifax_validate_route_id()`, `verdifax_dse_dispatch_hash()`, `verdifax_dcae_closure_hash()`, `verdifax_cres_receipt_hash()` and `verdifax_run_statuses()`.
+These make no request: `verdifax_client()`, `verdifax_from_env()`, `verdifax_job()`, `verdifax_capture_environment()`, `verdifax_format_provider_payload()`, `verdifax_sign_request()`, `verdifax_request_key_registration_body()`, `verdifax_request_signature_preimage()`, `verdifax_generate_request_key()`, `verdifax_validate_hex64()`, `verdifax_validate_route_id()`, `verdifax_dse_dispatch_hash()`, `verdifax_dcae_closure_hash()`, `verdifax_cres_receipt_hash()` and `verdifax_run_statuses()`.
 
 `verdifax_get_run_artifacts()`, `verdifax_get_public_bundle()` and `verdifax_get_public_bundle_by_token()` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
 
@@ -157,6 +160,39 @@ for (row in batch$results) {
 
 The client's `timeout` covers the whole batch, so raise it for a large one. A batch is one POST and it is never retried. After a timeout the server may have run some or all of the rows, so list your runs before you send them again.
 
+## Jobs
+
+A job is a map of the steps of one piece of work. Each step names the records it directly follows, so work can split into branches and join again. This example runs one step, two after it, and a final step joining them:
+
+```r
+job <- verdifax_job(client, "loan-1")
+
+step <- function(step_id, payload, ...) {
+  verdifax_job_step(
+    job, step_id, ...,
+    payload = payload,
+    program_id = strrep("0", 64),
+    route_id = "loan",
+    registry_record_hash = strrep("0", 64)
+  )
+}
+
+step("intake", "application received")
+step("credit", "credit check", after = "intake")
+step("fraud", "fraud check", after = "intake")
+step("decide", "approved", after = c("credit", "fraud"), final = TRUE)
+
+job$record_hashes # step id to record hash
+```
+
+Without `after`, a step follows the step run just before it through this job, and the first step follows nothing. `after = character(0)` or `after = list()` starts another root step. A step id the job has not recorded is refused before anything is sent. `external_previous` names records from outside the job.
+
+A refused or halted step stays in the map. `verdifax_job_step()` records its hash and then stops with the same error as `verdifax_attest()`, so a later step can name it in `after`. A step that sealed nothing, such as a timeout or a 409, is not recorded and does not change which step comes next. A successful step with no `record_hash` uses its manifest hash, and if the response holds neither, the call stops with an error, so the map never silently gets a gap.
+
+`job_id` and `step_id` are 1 to 128 letters, digits, dots, underscores, colons or dashes, and anything else is refused before sending. To build the block yourself, pass `job` to `verdifax_attest()`, `verdifax_execute()` or a provider helper, or put it in a batch row. The hash lists are sorted and repeats removed for you. A block with an unknown field, a `final` that is not `TRUE` or `FALSE`, or hash lists that are not vectors or lists of strings is refused before sending. `verdifax_export_runs()` and `verdifax_export_runs_csv()` take `job_id` to export one job's runs.
+
+A job map covers what was sent. It cannot show a step that was never sent.
+
 ## Evidence export
 
 `verdifax_export_runs()` lists the runs the server holds for your key in a period, failures included, with up to 10,000 rows per export. `verdifax_export_runs_csv()` returns the same rows as raw CSV text.
@@ -183,7 +219,7 @@ The export states what the server stored, not a verdict. A call that never reach
 
 `verdifax_attest_claude_response()` and `verdifax_attest_openai_response()` attest a prompt and response as one payload: canonical JSON, exactly `{"prompt":...,"provider":...,"response":...}` with sorted keys and no extra whitespace, UTF-8, with `provider` set to `anthropic` or `openai`. `verdifax_format_provider_payload()` builds that text. All four Verdifax SDKs produce the same bytes.
 
-`govern` is `FALSE` by default. Set `govern = TRUE` to also send the response text as `ai_output_text` for the AIVP review, which runs on Anthropic in production. Without it, the AI output text is not sent for review.
+Both take an optional `job` block and return what `verdifax_attest()` returns, including `record_hash` and `signed_request`, and their errors hold both too. `govern` is `FALSE` by default. Set `govern = TRUE` to also send the response text as `ai_output_text` for the AIVP review, which runs on Anthropic in production. Without it, the AI output text is not sent for review.
 
 ## Optional execute fields
 
@@ -245,14 +281,24 @@ result <- verdifax_attest(
   registry_record_hash = strrep("0", 64)
 )
 
-verdifax_clear_request_key(client) # stops requiring signatures on this API key
+# Replace the key. The current key approves, then the client signs with the new one.
+new_key <- verdifax_generate_request_key()$private_key
+verdifax_rotate_request_key(client, new_key)
+
+# The current key approves. This stops requiring signatures on this API key,
+# and the client then sends unsigned requests.
+verdifax_clear_request_key(client)
 ```
 
 Registering a key changes that API key for every client that uses it: the server then refuses a run without a valid signature, so every caller on the key needs the private key. Each request carries the time and a fresh random nonce. The server refuses a repeated nonce and a time more than five minutes from its own clock.
 
+A signed call serializes the request once and signs those exact bytes with signature version 2, which also covers the AI output and the job block. The request goes as `signed_request`, a JSON string, beside `request_signature`, and the server reads only that text. The result holds `signed_request`, so you can save it and check it with `verdifax-verify --request FILE`. A refused or halted run stops with the httr2 error, and that condition holds `signed_request` and `record_hash`. In a batch each result holds its row's `signed_request`, and a job keeps each step's text in `job$signed_requests`, refused steps included. `verdifax_execute()` returns only the manifest, so use `verdifax_attest()` when you need the text. Its errors hold both fields. `verdifax_sign_request()` and `verdifax_request_signature_preimage()` still build the older version 1 signature, which cannot carry a job.
+
+Once a key is registered, the server needs that key to approve replacing or clearing it. `verdifax_rotate_request_key()` and `verdifax_clear_request_key()` send that approval, so call them with a client that holds the current key. After a rotate the client and its copies sign with the new key. After a clear they drop the key and send unsigned requests, because the server refuses a signed run on an API key with no registered key. If the key is lost, an admin can clear it with `verdifax_admin_clear_request_key()` after a manual check.
+
 In a batch each row carries its own signature and nonce, and the server checks them as it reaches that row. A row refused for its signature comes back in `results`, so a repeated batch returns HTTP 200 with failed rows, and a row reached more than five minutes after it was signed fails the same way. A determinism check uses one signature for the request, and repeating it returns HTTP 403.
 
-The signature shows the holder of the key requested the run. It does not show the key holder accepted the outcome.
+A signature shows who requested the run, not that they accepted the outcome.
 
 ## Dependencies
 

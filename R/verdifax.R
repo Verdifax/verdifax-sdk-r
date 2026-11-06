@@ -4,9 +4,10 @@
 #
 # This file holds the client, environment capture, attestation, the
 # determinism check and request signing. R/runs.R holds run retrieval,
-# evidence export and batch runs. R/routes.R holds every other route and
-# the provider and admin helpers. R/section0.R holds the canonical hash
-# formulas. README.md lists every exported function.
+# evidence export and batch runs. R/jobs.R holds job blocks and the job
+# helper. R/routes.R holds every other route and the provider and admin
+# helpers. R/section0.R holds the canonical hash formulas. README.md lists
+# every exported function.
 #
 # All failures from auto-detection are silently swallowed and the
 # corresponding field is left NULL. The orchestrator records NULL as
@@ -25,7 +26,11 @@
 .DEFAULT_TIMEOUT_SEC <- 90
 .REQUEST_KEY_PATH <- "/keys/request-key"
 .REQUEST_SIGNATURE_FORM <- "verdifax.request.v1"
+.REQUEST_SIGNATURE_V2_FORM <- "verdifax.request.v2"
+.REQUEST_SIGNATURE_VERSION <- "2"
 .REQUEST_KEY_PROOF_FORM <- "verdifax.request-key.v1"
+.REQUEST_KEY_CHANGE_FORM <- "verdifax.request-key-change.v1"
+.JOB_FORM <- "verdifax.job.v1"
 .SIGNING_KEY_BYTES <- 32L
 .DEFAULT_MAX_RETRIES <- 3L
 .DEFAULT_RETRY_BASE_DELAY_SEC <- 0.2
@@ -48,9 +53,9 @@
 #'   Ed25519 private key, from `verdifax_generate_request_key()`. When
 #'   set, `verdifax_attest()`, `verdifax_execute()`,
 #'   `verdifax_execute_batch()`, `verdifax_verify_determinism()` and the
-#'   provider helpers sign their requests. Needs the `sodium` package. The key is never sent
-#'   to the server, and the returned list holds it only inside a
-#'   closure, so printing the client does not show it.
+#'   provider helpers sign their requests. Needs the `sodium` package.
+#'   The key is never sent to the server, and the returned list holds it
+#'   only inside a closure, so printing the client does not show it.
 #' @param user_agent Optional `User-Agent` value.
 #' @param max_retries Retries for GET, HEAD and OPTIONS after a network
 #'   failure or an HTTP 429, 502, 503 or 504. Defaults to 3; 0 turns them
@@ -328,6 +333,33 @@ verdifax_capture_environment <- function(declared_seeds = list(),
 }
 
 
+# The record_hash of a refused or halted run, from the error body.
+.error_record_hash <- function(error) {
+  tryCatch({
+    value <- jsonlite::fromJSON(httr2::resp_body_string(error$resp), simplifyVector = FALSE)[["record_hash"]]
+    if (is.character(value) && length(value) == 1 && nzchar(value)) value else NULL
+  }, error = function(e) NULL)
+}
+
+# Posts one execute body. A refused or halted run answers with an error
+# status and still leaves a record, so the same error goes on, holding that
+# record's hash and the text that was signed.
+.post_execute <- function(client, path, body) {
+  wire <- .attach_signature(client, body)
+  signed_request <- wire[["signed_request"]]
+  result <- tryCatch(
+    .perform(.build_request(client, path, wire)),
+    httr2_http = function(error) {
+      error$record_hash <- .error_record_hash(error)
+      error$signed_request <- signed_request
+      stop(error)
+    }
+  )
+  result$signed_request <- signed_request
+  result
+}
+
+
 # ── Attestation ─────────────────────────────────────────────────────────────
 
 #' Attest a payload through the Verdifax pipeline.
@@ -356,9 +388,18 @@ verdifax_capture_environment <- function(declared_seeds = list(),
 #'   metadata, recorded as supplied and not an assessment by Verdifax.
 #' @param causal_graph Optional named list recording what led to this
 #'   run, recorded as supplied.
+#' @param job Optional named list placing this run in a job: `job_id`,
+#'   `step_id`, and optionally `previous_record_hashes`,
+#'   `external_previous` and `final`. Bad names are refused before
+#'   sending. The hash lists are sorted and repeats removed for you.
+#'   `verdifax_job_step()` builds this for you.
 #'
-#' @return Parsed API response list with `ok`, `run_id`,
-#'   `manifest`, etc.
+#' @return Parsed API response list with `ok`, `run_id`, `record_hash`,
+#'   `manifest`, etc. A signed call also has `signed_request`, the exact
+#'   JSON text that was signed, to keep for
+#'   `verdifax-verify --request FILE`. A refused or halted run stops with
+#'   the httr2 error, and that condition holds `record_hash` and, for a
+#'   signed call, `signed_request`.
 #'
 #' @export
 verdifax_attest <- function(client,
@@ -372,7 +413,8 @@ verdifax_attest <- function(client,
                             request_substance = NULL,
                             authorization_chain = NULL,
                             regulatory_scaffolding = NULL,
-                            causal_graph = NULL) {
+                            causal_graph = NULL,
+                            job = NULL) {
   body <- .build_execute_body(
     payload = payload,
     program_id = program_id,
@@ -384,10 +426,10 @@ verdifax_attest <- function(client,
     request_substance = request_substance,
     authorization_chain = authorization_chain,
     regulatory_scaffolding = regulatory_scaffolding,
-    causal_graph = causal_graph
+    causal_graph = causal_graph,
+    job = job
   )
-  req <- .build_request(client, "/execute", .attach_signature(client, body))
-  .perform(req)
+  .post_execute(client, "/execute", body)
 }
 
 
@@ -410,7 +452,8 @@ verdifax_attest <- function(client,
 #' @inheritParams verdifax_attest
 #'
 #' @return Parsed API response list with `deterministic`, `first`,
-#'   `second`, and `diff` fields.
+#'   `second`, and `diff` fields. A signed call also has
+#'   `signed_request`, the exact JSON text that was signed.
 #'
 #' @export
 verdifax_verify_determinism <- function(client,
@@ -438,12 +481,7 @@ verdifax_verify_determinism <- function(client,
     regulatory_scaffolding = regulatory_scaffolding,
     causal_graph = causal_graph
   )
-  req <- .build_request(
-    client,
-    "/execute/verify-determinism",
-    .attach_signature(client, body)
-  )
-  .perform(req)
+  .post_execute(client, "/execute/verify-determinism", body)
 }
 
 
@@ -481,19 +519,56 @@ verdifax_generate_request_key <- function() {
 #'
 #' @export
 verdifax_register_request_key <- function(client) {
-  if (is.null(client$signer)) {
+  signer <- .active_signer(client)
+  if (is.null(signer)) {
     stop(
       "verdifax_register_request_key needs a client with signing_key",
       call. = FALSE
     )
   }
-  body <- .request_key_body(client$signer)
+  body <- .request_key_body(signer)
   .perform(.build_request(client, .REQUEST_KEY_PATH, body))
+}
+
+#' Replace the registered public key.
+#'
+#' The server needs the current key to approve the change, so this sends
+#' the new public key with its proof, made by the new key, and an approval
+#' made by the current key. After success the client signs with the new
+#' key, and so does every copy of the client, such as one held by a job.
+#' After a failure it keeps the current key.
+#'
+#' @param client A client handle from `verdifax_client()`, constructed
+#'   with the current `signing_key`.
+#' @param new_signing_key The 32 raw bytes of the new Ed25519 private key.
+#'
+#' @return Parsed API response list with `ok` and `public_key`.
+#'
+#' @export
+verdifax_rotate_request_key <- function(client, new_signing_key) {
+  signer <- .active_signer(client)
+  if (is.null(signer)) {
+    stop(
+      "verdifax_rotate_request_key needs a client with signing_key",
+      call. = FALSE
+    )
+  }
+  replacement <- .request_signer(new_signing_key)
+  body <- .request_key_body(replacement)
+  body$change <- .key_change(signer, body[["public_key"]])
+  result <- .send(client, "POST", .REQUEST_KEY_PATH, body)
+  .adopt_signer(signer, replacement)
+  result
 }
 
 #' Clear the registered public key.
 #'
-#' The server stops requiring request signatures on this API key.
+#' The server stops requiring request signatures on this API key. Once a
+#' key is registered, the server needs that key to approve clearing it,
+#' so call this with a client that holds it. After success the client
+#' drops its signing key and sends unsigned requests, because the server
+#' refuses a signed run on this API key, and so does every copy of the
+#' client, such as one held by a job. After a failure it keeps the key.
 #'
 #' @param client A client handle from `verdifax_client()`.
 #'
@@ -501,7 +576,13 @@ verdifax_register_request_key <- function(client) {
 #'
 #' @export
 verdifax_clear_request_key <- function(client) {
-  .perform(.build_request(client, .REQUEST_KEY_PATH, NULL, method = "DELETE"))
+  signer <- .active_signer(client)
+  body <- if (!is.null(signer)) list(change = .key_change(signer, ""))
+  result <- .send(client, "DELETE", .REQUEST_KEY_PATH, body)
+  if (!is.null(signer)) {
+    .drop_signer(signer)
+  }
+  result
 }
 
 .sodium_available <- function() {
@@ -520,7 +601,9 @@ verdifax_clear_request_key <- function(client) {
 
 # The key stays inside these closures, so printing the client shows
 # no key bytes. sodium::sig_sign() takes the 64-byte form that
-# sig_keygen() builds from the 32 raw bytes.
+# sig_keygen() builds from the 32 raw bytes. The signer is an environment
+# because a client is a list, copied on assignment, and rotating a key has
+# to reach the caller's client and any job holding a copy of it.
 .request_signer <- function(signing_key) {
   if (!is.raw(signing_key) || length(signing_key) != .SIGNING_KEY_BYTES) {
     stop(
@@ -530,10 +613,29 @@ verdifax_clear_request_key <- function(client) {
   }
   .require_sodium()
   expanded <- sodium::sig_keygen(signing_key)
-  list(
-    public_key = sodium::sig_pubkey(expanded),
-    sign = function(message) sodium::sig_sign(message, expanded)
-  )
+  signer <- new.env(parent = emptyenv())
+  signer$public_key <- sodium::sig_pubkey(expanded)
+  signer$sign <- function(message) sodium::sig_sign(message, expanded)
+  signer
+}
+
+.adopt_signer <- function(signer, replacement) {
+  signer$public_key <- replacement$public_key
+  signer$sign <- replacement$sign
+  invisible(signer)
+}
+
+# Letting go of the closure lets go of the key.
+.drop_signer <- function(signer) {
+  signer$public_key <- NULL
+  signer$sign <- NULL
+  invisible(signer)
+}
+
+# The client's signer, or NULL when it has none or has dropped it.
+.active_signer <- function(client) {
+  signer <- client$signer
+  if (is.null(signer) || is.null(signer$sign)) NULL else signer
 }
 
 # The string as the server will decode it: put through the JSON
@@ -576,16 +678,25 @@ verdifax_clear_request_key <- function(client) {
   if (is.null(payload)) {
     payload <- ""
   }
-  sodium::bin2hex(sodium::sha256(.utf8_bytes(.wire_string(payload))))
+  .sha256_hex(.wire_string(payload))
 }
 
+.sha256_hex <- function(text) {
+  sodium::bin2hex(sodium::sha256(.utf8_bytes(text)))
+}
+
+.signing_time <- function() {
+  format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+}
+
+.signing_nonce <- function() {
+  sodium::bin2hex(sodium::random(16))
+}
+
+# Version 1, kept for verdifax_sign_request(). A client sends version 2.
 .request_signature <- function(signer, body, signed_at = NULL, nonce = NULL) {
-  if (is.null(signed_at)) {
-    signed_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
-  }
-  if (is.null(nonce)) {
-    nonce <- sodium::bin2hex(sodium::random(16))
-  }
+  signed_at <- signed_at %||% .signing_time()
+  nonce <- nonce %||% .signing_nonce()
   preimage <- .join_with_zero(list(
     .REQUEST_SIGNATURE_FORM,
     .payload_hash(body),
@@ -602,19 +713,105 @@ verdifax_clear_request_key <- function(client) {
   )
 }
 
+# The request as one JSON text, with the options req_body_json() uses, so
+# signing does not change how any value is written. The text is UTF-8
+# whatever the locale, and this is the only time it is serialized.
+.request_text <- function(body) {
+  text <- as.character(jsonlite::toJSON(body, auto_unbox = TRUE, digits = 22, null = "null"))
+  Encoding(text) <- "UTF-8"
+  text
+}
+
+# A field as the signed text holds it. A missing field is the empty string
+# and the server refuses that row on its fields, not on its signature.
+.request_field <- function(request, name) {
+  value <- request[[name]]
+  if (is.null(value)) "" else .wire_string(value)
+}
+
+.ai_output_hash <- function(request) {
+  text <- .request_field(request, "ai_output_text")
+  if (identical(text, "")) "" else .sha256_hex(text)
+}
+
+# With no job, job_id, step_id and both lists are empty and final is false.
+.job_preimage_fields <- function(job) {
+  list(
+    .JOB_FORM,
+    job[["job_id"]] %||% "",
+    job[["step_id"]] %||% "",
+    paste(unlist(job[["previous_record_hashes"]]), collapse = ","),
+    paste(unlist(job[["external_previous"]]), collapse = ","),
+    if (isTRUE(job[["final"]])) "true" else "false"
+  )
+}
+
+.request_preimage_v2 <- function(body_hash, payload_hash, program_id, route_id,
+                                 registry_record_hash, ai_output_hash, job,
+                                 signed_at, nonce) {
+  .join_with_zero(c(
+    list(
+      .REQUEST_SIGNATURE_V2_FORM, body_hash, payload_hash, program_id, route_id,
+      registry_record_hash, ai_output_hash
+    ),
+    .job_preimage_fields(job),
+    list(signed_at, nonce)
+  ))
+}
+
+# Every value comes from the text itself, so what is signed is what the
+# server will read, in any locale and with nothing rebuilt.
+.signed_text_preimage <- function(text, signed_at, nonce) {
+  request <- jsonlite::fromJSON(text, simplifyVector = FALSE)
+  .request_preimage_v2(
+    body_hash = .sha256_hex(text),
+    payload_hash = .payload_hash(request),
+    program_id = .request_field(request, "program_id"),
+    route_id = .request_field(request, "route_id"),
+    registry_record_hash = .request_field(request, "registry_record_hash"),
+    ai_output_hash = .ai_output_hash(request),
+    job = request[["job"]],
+    signed_at = signed_at,
+    nonce = nonce
+  )
+}
+
+.signed_body <- function(signer, text, signed_at = NULL, nonce = NULL) {
+  signed_at <- signed_at %||% .signing_time()
+  nonce <- nonce %||% .signing_nonce()
+  list(
+    signed_request = text,
+    request_signature = list(
+      version = .REQUEST_SIGNATURE_VERSION,
+      signature = .base64(signer$sign(.signed_text_preimage(text, signed_at, nonce))),
+      signed_at = signed_at,
+      nonce = nonce
+    )
+  )
+}
+
 # With no signer the body is returned unchanged.
 .attach_signature <- function(client, body) {
-  if (is.null(client$signer)) {
+  signer <- .active_signer(client)
+  if (is.null(signer)) {
     return(body)
   }
-  body$request_signature <- .request_signature(client$signer, body)
-  body
+  .signed_body(signer, .request_text(body))
 }
 
 .request_key_body <- function(signer) {
   public_key <- .base64(signer$public_key)
   proof <- signer$sign(.join_with_zero(list(.REQUEST_KEY_PROOF_FORM, public_key)))
   list(public_key = public_key, proof = .base64(proof))
+}
+
+# The current key's approval of a change. new_public_key is the new key as
+# base64, or the empty string when clearing.
+.key_change <- function(signer, new_public_key, signed_at = NULL, nonce = NULL) {
+  signed_at <- signed_at %||% .signing_time()
+  nonce <- nonce %||% .signing_nonce()
+  preimage <- .join_with_zero(list(.REQUEST_KEY_CHANGE_FORM, new_public_key, signed_at, nonce))
+  list(signature = .base64(signer$sign(preimage)), signed_at = signed_at, nonce = nonce)
 }
 
 
@@ -630,7 +827,8 @@ verdifax_clear_request_key <- function(client) {
                                 request_substance = NULL,
                                 authorization_chain = NULL,
                                 regulatory_scaffolding = NULL,
-                                causal_graph = NULL) {
+                                causal_graph = NULL,
+                                job = NULL) {
   verdifax_validate_hex64(program_id, "program_id")
   verdifax_validate_hex64(registry_record_hash, "registry_record_hash")
   verdifax_validate_route_id(route_id)
@@ -649,7 +847,8 @@ verdifax_clear_request_key <- function(client) {
     request_substance = request_substance,
     authorization_chain = authorization_chain,
     regulatory_scaffolding = regulatory_scaffolding,
-    causal_graph = causal_graph
+    causal_graph = causal_graph,
+    job = job
   )
 }
 
@@ -692,7 +891,8 @@ verdifax_clear_request_key <- function(client) {
 }
 
 # The fields of one execute body, with no checks on their values, so a
-# batch can leave a bad row for the server to report in its result.
+# batch can leave a bad row for the server to report in its result. A job
+# block is the exception: .job_block() refuses a bad one here.
 .execute_fields <- function(payload,
                             program_id,
                             route_id,
@@ -703,7 +903,8 @@ verdifax_clear_request_key <- function(client) {
                             request_substance = NULL,
                             authorization_chain = NULL,
                             regulatory_scaffolding = NULL,
-                            causal_graph = NULL) {
+                            causal_graph = NULL,
+                            job = NULL) {
   body <- list(
     program_id = program_id,
     route_id = route_id,
@@ -758,6 +959,10 @@ verdifax_clear_request_key <- function(client) {
   body$authorization_chain <- authorization_chain
   body$regulatory_scaffolding <- regulatory_scaffolding
   body$causal_graph <- causal_graph
+
+  if (!is.null(job)) {
+    body$job <- .job_block(job)
+  }
 
   body
 }

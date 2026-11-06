@@ -306,18 +306,27 @@ test_that("a signed batch gives each row its own signature and nonce", {
   body <- sent[[1]]$body$runs
   expect_length(body, 3)
   public_key <- jsonlite::base64_dec("iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=")
+  hex <- function(text) sodium::bin2hex(sodium::sha256(charToRaw(text)))
   for (row in body) {
+    expect_setequal(names(row), c("signed_request", "request_signature"))
     signature <- row$request_signature
+    expect_identical(signature$version, "2")
     expect_match(signature$nonce, "^[0-9a-f]{32}$")
-    fields <- list(
-      charToRaw("verdifax.request.v1"),
-      charToRaw(sodium::bin2hex(sodium::sha256(charToRaw(row$payload_text)))),
-      charToRaw(row$program_id),
-      charToRaw(row$route_id),
-      charToRaw(row$registry_record_hash),
-      charToRaw(signature$signed_at),
-      charToRaw(signature$nonce)
-    )
+    request <- jsonlite::fromJSON(row$signed_request, simplifyVector = FALSE)
+    fields <- lapply(list(
+      "verdifax.request.v2",
+      hex(row$signed_request),
+      hex(request$payload_text),
+      request$program_id,
+      request$route_id,
+      request$registry_record_hash,
+      "",
+      "verdifax.job.v1",
+      "", "", "", "",
+      "false",
+      signature$signed_at,
+      signature$nonce
+    ), charToRaw)
     signed <- Reduce(function(a, b) c(a, as.raw(0), b), fields)
     expect_true(sodium::sig_verify(signed, jsonlite::base64_dec(signature$signature), public_key))
   }
@@ -334,7 +343,34 @@ test_that("a signed batch sends an incomplete row for the server to report", {
   )
   row <- sent[[1]]$body$runs[[1]]
   expect_false(is.null(row$request_signature))
-  expect_null(row$program_id)
+  expect_null(jsonlite::fromJSON(row$signed_request, simplifyVector = FALSE)$program_id)
+})
+
+test_that("each batch result holds its row's signed text, by position", {
+  need_sodium()
+  rows <- list(.row, utils::modifyList(.row, list(payload = "other")))
+  # The server leaves index 0 on a row it could not read.
+  reply <- paste0(
+    "{\"ok\":true,\"total\":2,\"results\":[",
+    "{\"index\":0,\"ok\":true,\"record_hash\":\"a\"},",
+    "{\"index\":0,\"ok\":false,\"error\":\"x\"}]}"
+  )
+  sent <- capture(
+    result <- verdifax_execute_batch(test_client(as.raw(rep(1L, 32))), rows),
+    function(req) json_response(reply)
+  )
+  runs <- sent[[1]]$body$runs
+  expect_identical(result$results[[1]]$signed_request, runs[[1]]$signed_request)
+  expect_identical(result$results[[2]]$signed_request, runs[[2]]$signed_request)
+  expect_equal(result$results[[1]]$record_hash, "a")
+})
+
+test_that("an unsigned batch result has no signed_request", {
+  capture(
+    result <- verdifax_execute_batch(test_client(), list(.row)),
+    function(req) json_response("{\"ok\":true,\"results\":[{\"index\":0,\"ok\":true}]}")
+  )
+  expect_null(result$results[[1]]$signed_request)
 })
 
 test_that("a batch the server refuses stops with its message", {

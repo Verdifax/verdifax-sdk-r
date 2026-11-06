@@ -112,7 +112,8 @@ verdifax_run_statuses <- function() {
 
 #' Run the pipeline and return just the manifest.
 #'
-#' A lower-level alternative to `verdifax_attest()`.
+#' A lower-level alternative to `verdifax_attest()`. Use
+#' `verdifax_attest()` when you need `record_hash` or `signed_request`.
 #'
 #' @inheritParams verdifax_attest
 #'
@@ -130,7 +131,8 @@ verdifax_execute <- function(client,
                              request_substance = NULL,
                              authorization_chain = NULL,
                              regulatory_scaffolding = NULL,
-                             causal_graph = NULL) {
+                             causal_graph = NULL,
+                             job = NULL) {
   verdifax_attest(
     client = client,
     payload = payload,
@@ -143,7 +145,8 @@ verdifax_execute <- function(client,
     request_substance = request_substance,
     authorization_chain = authorization_chain,
     regulatory_scaffolding = regulatory_scaffolding,
-    causal_graph = causal_graph
+    causal_graph = causal_graph,
+    job = job
   )[["manifest"]]
 }
 
@@ -395,6 +398,22 @@ verdifax_admin_revoke_key <- function(client, key_id) {
   invisible(NULL)
 }
 
+#' Clear the request key registered on an API key.
+#'
+#' For a key whose holder lost it, after a manual check. It is the one
+#' way to clear a request key without that key. The client keeps its own
+#' signing key, because `key_id` can be any API key.
+#'
+#' @inheritParams verdifax_health
+#' @param key_id The API key's id.
+#'
+#' @return Parsed API response list with `ok`.
+#'
+#' @export
+verdifax_admin_clear_request_key <- function(client, key_id) {
+  .send(client, "DELETE", paste0("/admin/keys/", .require_id(key_id, "key_id"), "/request-key"))
+}
+
 #' Shred one field and return its sealed deletion receipt.
 #'
 #' @inheritParams verdifax_verify_run
@@ -471,7 +490,7 @@ verdifax_format_provider_payload <- function(provider, prompt, response) {
 }
 
 .attest_provider_response <- function(client, provider, prompt, response, program_id, route_id,
-                                      registry_record_hash, govern) {
+                                      registry_record_hash, govern, job = NULL) {
   if (!is.character(response) || length(response) != 1 || !nzchar(response)) {
     stop("response is required for attestation", call. = FALSE)
   }
@@ -482,7 +501,8 @@ verdifax_format_provider_payload <- function(provider, prompt, response) {
     route_id = route_id,
     registry_record_hash = registry_record_hash,
     ai_output_text = if (isTRUE(govern)) response else NULL,
-    attested_context = list(actor_role = "ai_assistant", model_provider = provider)
+    attested_context = list(actor_role = "ai_assistant", model_provider = provider),
+    job = job
   )
 }
 
@@ -501,9 +521,9 @@ verdifax_format_provider_payload <- function(provider, prompt, response) {
 #'
 #' @export
 verdifax_attest_claude_response <- function(client, prompt, response, program_id, route_id,
-                                            registry_record_hash, govern = FALSE) {
+                                            registry_record_hash, govern = FALSE, job = NULL) {
   .attest_provider_response(
-    client, "anthropic", prompt, response, program_id, route_id, registry_record_hash, govern
+    client, "anthropic", prompt, response, program_id, route_id, registry_record_hash, govern, job
   )
 }
 
@@ -517,19 +537,20 @@ verdifax_attest_claude_response <- function(client, prompt, response, program_id
 #'
 #' @export
 verdifax_attest_openai_response <- function(client, prompt, response, program_id, route_id,
-                                            registry_record_hash, govern = FALSE) {
+                                            registry_record_hash, govern = FALSE, job = NULL) {
   .attest_provider_response(
-    client, "openai", prompt, response, program_id, route_id, registry_record_hash, govern
+    client, "openai", prompt, response, program_id, route_id, registry_record_hash, govern, job
   )
 }
 
 
 # ── Signing without sending ─────────────────────────────────────────────────
 
-#' Build a request signature without sending anything.
+#' Build a version 1 request signature without sending anything.
 #'
-#' A client with a `signing_key` does this itself. Needs the `sodium`
-#' package.
+#' A client with a `signing_key` signs each request itself, with version
+#' 2. This helper builds the older version 1 signature, which cannot
+#' carry a job. Needs the `sodium` package.
 #'
 #' @param signing_key The 32 raw bytes of an Ed25519 private key.
 #' @param body A named list holding the request's `payload_text` or
@@ -558,7 +579,7 @@ verdifax_request_key_registration_body <- function(signing_key) {
   .request_key_body(.request_signer(signing_key))
 }
 
-#' The bytes a request signature signs.
+#' The bytes a version 1 request signature signs.
 #'
 #' @param payload_hash The SHA-256 of the payload as hex.
 #' @param program_id The program ID.

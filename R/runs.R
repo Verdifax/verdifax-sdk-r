@@ -132,13 +132,18 @@ verdifax_search_runs <- function(client,
 #' @param from Optional RFC 3339 time, inclusive.
 #' @param to Optional RFC 3339 time, exclusive. Defaults to the time of
 #'   the request.
+#' @param job_id Optional job. Limits the export to that job's runs.
 #'
 #' @return Parsed API response list with `to`, `total`, `returned`,
-#'   `truncated`, `by_status` and `runs`.
+#'   `truncated`, `by_status` and `runs`. New rows hold `anchor_source`,
+#'   `job_id` and `step_id`.
 #'
 #' @export
-verdifax_export_runs <- function(client, from = NULL, to = NULL) {
-  query <- .query(from = from, to = to, format = "json")
+verdifax_export_runs <- function(client, from = NULL, to = NULL, job_id = NULL) {
+  if (!is.null(job_id)) {
+    .check_job_name(job_id, "job_id")
+  }
+  query <- .query(from = from, to = to, job_id = job_id, format = "json")
   .perform(.get(client, "/runs/export", query))
 }
 
@@ -155,8 +160,11 @@ verdifax_export_runs <- function(client, from = NULL, to = NULL) {
 #'   the runs held for the period, and `truncated`.
 #'
 #' @export
-verdifax_export_runs_csv <- function(client, from = NULL, to = NULL) {
-  query <- .query(from = from, to = to, format = "csv")
+verdifax_export_runs_csv <- function(client, from = NULL, to = NULL, job_id = NULL) {
+  if (!is.null(job_id)) {
+    .check_job_name(job_id, "job_id")
+  }
+  query <- .query(from = from, to = to, job_id = job_id, format = "csv")
   resp <- httr2::req_perform(.get(client, "/runs/export", query))
   total <- httr2::resp_header(resp, .HEADER_EXPORT_TOTAL)
   truncated <- httr2::resp_header(resp, .HEADER_EXPORT_TRUNCATED)
@@ -179,22 +187,6 @@ verdifax_export_runs_csv <- function(client, from = NULL, to = NULL) {
 
 # ── Batch runs ──────────────────────────────────────────────────────────────
 
-# Fills in a row's missing fields as empty strings for signing only. The
-# server refuses such a row on its fields before it reads the signature.
-.signed_row <- function(client, row) {
-  if (is.null(client$signer)) {
-    return(row)
-  }
-  fields <- row
-  for (name in c("program_id", "route_id", "registry_record_hash")) {
-    if (is.null(fields[[name]])) {
-      fields[[name]] <- ""
-    }
-  }
-  row$request_signature <- .request_signature(client$signer, fields)
-  row
-}
-
 .batch_row <- function(row) {
   if (!is.list(row) || is.null(names(row))) {
     stop(
@@ -206,7 +198,7 @@ verdifax_export_runs_csv <- function(client, from = NULL, to = NULL) {
     "payload", "program_id", "route_id", "registry_record_hash",
     "reproducibility_context", "ai_output_text", "attested_context",
     "request_substance", "authorization_chain", "regulatory_scaffolding",
-    "causal_graph"
+    "causal_graph", "job"
   )
   body <- .execute_fields(
     payload = row[["payload"]],
@@ -219,7 +211,8 @@ verdifax_export_runs_csv <- function(client, from = NULL, to = NULL) {
     request_substance = row[["request_substance"]],
     authorization_chain = row[["authorization_chain"]],
     regulatory_scaffolding = row[["regulatory_scaffolding"]],
-    causal_graph = row[["causal_graph"]]
+    causal_graph = row[["causal_graph"]],
+    job = row[["job"]]
   )
   # A NULL element would reach the wire as {}, and the server would
   # refuse the whole batch instead of this row.
@@ -227,12 +220,28 @@ verdifax_export_runs_csv <- function(client, from = NULL, to = NULL) {
   c(body, row[setdiff(names(row), known)])
 }
 
+# Each result gets the text its row signed. Results line up with rows by
+# position. A result's index is not used, because the server leaves it 0
+# on a row it could not read.
+.add_signed_requests <- function(result, rows) {
+  results <- result[["results"]]
+  if (length(results) != length(rows)) {
+    return(result)
+  }
+  for (i in seq_along(rows)) {
+    results[[i]]$signed_request <- rows[[i]][["signed_request"]]
+  }
+  result$results <- results
+  result
+}
+
 #' Send up to 1,000 runs in one request.
 #'
 #' Calls `POST /execute/batch`. The rows are not checked here: the
 #' server reports a bad row in that row's result, and a failed row does
-#' not stop the call. With a `signing_key`, each row carries its own
-#' signature and nonce.
+#' not stop the call. A bad `job` block is the exception: it stops the
+#' call before anything is sent. With a `signing_key`, each row carries
+#' its own signature and nonce, and its result holds `signed_request`.
 #'
 #' This is one POST and it is never retried. After a timeout the server
 #' may have run some or all of the rows.
@@ -242,7 +251,8 @@ verdifax_export_runs_csv <- function(client, from = NULL, to = NULL) {
 #'   argument names of `verdifax_attest()`.
 #'
 #' @return Parsed API response list with `total`, `successful`,
-#'   `failed`, `duration_ms` and `results`.
+#'   `failed`, `duration_ms` and `results`. Each result holds
+#'   `record_hash` when the row left a record.
 #'
 #' @export
 verdifax_execute_batch <- function(client, runs) {
@@ -259,9 +269,9 @@ verdifax_execute_batch <- function(client, runs) {
       call. = FALSE
     )
   }
-  rows <- lapply(runs, function(row) .signed_row(client, .batch_row(row)))
+  rows <- lapply(runs, function(row) .attach_signature(client, .batch_row(row)))
   req <- .build_request(client, "/execute/batch", list(runs = rows))
-  .perform(httr2::req_error(req, body = .error_detail))
+  .add_signed_requests(.perform(httr2::req_error(req, body = .error_detail)), rows)
 }
 
 #' The most rows one batch can hold.

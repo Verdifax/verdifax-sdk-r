@@ -161,6 +161,24 @@ test_that("admin helpers call their routes", {
   ))
 })
 
+test_that("verdifax_admin_clear_request_key calls its route", {
+  sent <- capture(result <- verdifax_admin_clear_request_key(test_client(), 7))
+  expect_equal(sent[[1]]$method, "DELETE")
+  expect_equal(sent[[1]]$url$path, "/admin/keys/7/request-key")
+  expect_null(sent[[1]]$body)
+  expect_true(result$ok)
+})
+
+test_that("verdifax_admin_clear_request_key writes a large id in full", {
+  sent <- capture(verdifax_admin_clear_request_key(test_client(), 1e5))
+  expect_equal(sent[[1]]$url$path, "/admin/keys/100000/request-key")
+})
+
+test_that("verdifax_admin_clear_request_key refuses a bad id without a request", {
+  sent <- capture(expect_error(verdifax_admin_clear_request_key(test_client(), 0), "key_id"))
+  expect_length(sent, 0)
+})
+
 test_that("admin_erase leaves out an unset reference", {
   sent <- capture(verdifax_admin_erase(test_client(), 7, "f", strrep("c", 64)))
   expect_null(sent[[1]]$body$dsar_reference)
@@ -352,6 +370,12 @@ test_that("GET, HEAD and OPTIONS carry the retry policy and POST does not", {
   }
   off <- verdifax_client(base_url = "http://mock.invalid", max_retries = 0)
   expect_null(verdifax:::.build_request(off, "/x", NULL, method = "GET")$policies$retry_max_tries)
+})
+
+test_that("the default user agent names version 1.1.0", {
+  client <- verdifax_client(base_url = "http://mock.invalid")
+  req <- verdifax:::.build_request(client, "/x", NULL, method = "GET")
+  expect_equal(httr2::req_get_headers(req)[["User-Agent"]], "verdifax-r/1.1.0")
 })
 
 test_that("user_agent reaches the request", {

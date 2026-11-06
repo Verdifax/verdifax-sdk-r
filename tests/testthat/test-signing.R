@@ -60,22 +60,114 @@ attest <- function(client, payload) {
   )
 }
 
+# The request inside a signed body, read as the server reads it.
+signed_fields <- function(body) {
+  jsonlite::fromJSON(body$signed_request, simplifyVector = FALSE)
+}
+
+sha256_text <- function(text) {
+  sodium::bin2hex(sodium::sha256(charToRaw(enc2utf8(text))))
+}
+
 # Rebuilds the signed bytes from a sent body, as the server does,
 # written out independently of the SDK.
 signature_verifies <- function(body, public_key = jsonlite::base64_dec(.public_key)) {
-  payload <- if (is.null(body$payload_text)) body[["payload"]] else body$payload_text
+  request <- signed_fields(body)
+  payload <- if (is.null(request$payload_text)) request[["payload"]] else request$payload_text
   fields <- list(
-    charToRaw("verdifax.request.v1"),
-    charToRaw(sodium::bin2hex(sodium::sha256(charToRaw(enc2utf8(payload))))),
-    charToRaw(body$program_id),
-    charToRaw(body$route_id),
-    charToRaw(body$registry_record_hash),
+    charToRaw("verdifax.request.v2"),
+    charToRaw(sha256_text(body$signed_request)),
+    charToRaw(sha256_text(payload)),
+    charToRaw(request$program_id),
+    charToRaw(request$route_id),
+    charToRaw(request$registry_record_hash),
+    raw(0),
+    charToRaw("verdifax.job.v1"),
+    raw(0), raw(0), raw(0), raw(0),
+    charToRaw("false"),
     charToRaw(body$request_signature$signed_at),
     charToRaw(body$request_signature$nonce)
   )
   signed <- Reduce(function(a, b) c(a, as.raw(0), b), fields)
   sodium::sig_verify(signed, jsonlite::base64_dec(body$request_signature$signature), public_key)
 }
+
+.vector <- jsonlite::fromJSON(testthat::test_path("sdk-signature-vector.json"))
+vector_seed <- function() sodium::hex2bin(.vector$seed_hex)
+vector_signer <- function() verdifax:::.request_signer(vector_seed())
+
+test_that("vector: hashes come from the exact text", {
+  need_sodium()
+  text <- .vector$signed_request
+  expect_equal(verdifax:::.sha256_hex(text), .vector$body_hash)
+  request <- jsonlite::fromJSON(text, simplifyVector = FALSE)
+  expect_equal(verdifax:::.payload_hash(request), .vector$payload_hash)
+  expect_equal(verdifax:::.ai_output_hash(request), .vector$ai_output_hash)
+})
+
+test_that("vector: the preimage, byte for byte", {
+  need_sodium()
+  preimage <- verdifax:::.signed_text_preimage(.vector$signed_request, .vector$signed_at, .vector$nonce)
+  expect_equal(sodium::bin2hex(preimage), .vector$preimage_hex)
+})
+
+test_that("vector: the no-job preimage, byte for byte", {
+  need_sodium()
+  preimage <- verdifax:::.request_preimage_v2(
+    body_hash = verdifax:::.sha256_hex("{\"payload_text\":\"hello\"}"),
+    payload_hash = .vector$payload_hash,
+    program_id = strrep("1", 64),
+    route_id = "route-a",
+    registry_record_hash = strrep("2", 64),
+    ai_output_hash = "",
+    job = NULL,
+    signed_at = .vector$signed_at,
+    nonce = .vector$nonce
+  )
+  expect_equal(sodium::bin2hex(preimage), .vector$no_job_preimage_hex)
+})
+
+test_that("vector: the signature and the public key", {
+  need_sodium()
+  signer <- vector_signer()
+  expect_equal(verdifax:::.base64(signer$public_key), .vector$public_key)
+  body <- verdifax:::.signed_body(signer, .vector$signed_request, .vector$signed_at, .vector$nonce)
+  expect_identical(body$signed_request, .vector$signed_request)
+  expect_equal(body$request_signature, list(
+    version = "2",
+    signature = .vector$signature,
+    signed_at = .vector$signed_at,
+    nonce = .vector$nonce
+  ))
+})
+
+test_that("vector: the key change, byte for byte", {
+  need_sodium()
+  signer <- vector_signer()
+  preimage <- verdifax:::.join_with_zero(list(
+    verdifax:::.REQUEST_KEY_CHANGE_FORM, .vector$public_key, .vector$signed_at, .vector$nonce
+  ))
+  expect_equal(sodium::bin2hex(preimage), .vector$key_change_preimage_hex)
+  change <- verdifax:::.key_change(signer, .vector$public_key, .vector$signed_at, .vector$nonce)
+  expect_equal(change, list(
+    signature = .vector$key_change_signature,
+    signed_at = .vector$signed_at,
+    nonce = .vector$nonce
+  ))
+})
+
+test_that("the job block the SDK builds gives the vector's job fields", {
+  need_sodium()
+  job <- verdifax:::.job_block(list(
+    job_id = "loan-1",
+    step_id = "decide",
+    previous_record_hashes = c(strrep("b", 64), strrep("a", 64), strrep("b", 64)),
+    external_previous = strrep("c", 64),
+    final = TRUE
+  ))
+  request <- jsonlite::fromJSON(.vector$signed_request, simplifyVector = FALSE)
+  expect_equal(job, request$job)
+})
 
 test_that("shared vector: signed bytes", {
   need_sodium()
@@ -127,6 +219,18 @@ test_that("an unsigned client sends no request_signature and needs no sodium", {
   expect_null(sent[[1]]$body$request_signature)
 })
 
+test_that("verdifax_attest sends exactly signed_request and request_signature", {
+  need_sodium()
+  sent <- capture_requests(attest(signed_client(), "hello"))
+  body <- sent[[1]]$body
+  expect_setequal(names(body), c("signed_request", "request_signature"))
+  expect_setequal(names(body$request_signature), c("version", "signature", "signed_at", "nonce"))
+  expect_identical(body$request_signature$version, "2")
+  expect_type(body$signed_request, "character")
+  expect_null(signed_fields(body)$request_signature)
+  expect_equal(signed_fields(body)$payload_text, "hello")
+})
+
 test_that("verdifax_attest signs, and the signature verifies", {
   need_sodium()
   sent <- capture_requests(attest(signed_client(), "hello"))
@@ -137,9 +241,51 @@ test_that("verdifax_attest signs, and the signature verifies", {
   expect_match(body$request_signature$nonce, "^[0-9a-f]{32}$")
 })
 
+test_that("the result holds the exact text that was signed", {
+  need_sodium()
+  sent <- capture_requests(result <- attest(signed_client(), "caf\u00e9"))
+  expect_identical(result$signed_request, sent[[1]]$body$signed_request)
+  expect_true(signature_verifies(sent[[1]]$body))
+})
+
+test_that("an unsigned result has no signed_request", {
+  capture_requests(result <- attest(unsigned_client(), "hello"))
+  expect_null(result$signed_request)
+})
+
+test_that("ai_output_text is signed", {
+  need_sodium()
+  client <- signed_client()
+  sent <- capture_requests(result <- verdifax_attest(
+    client = client,
+    payload = "hello",
+    program_id = .program_id,
+    route_id = .route_id,
+    registry_record_hash = .registry_record_hash,
+    ai_output_text = "the answer"
+  ))
+  body <- sent[[1]]$body
+  preimage <- verdifax:::.request_preimage_v2(
+    body_hash = verdifax:::.sha256_hex(body$signed_request),
+    payload_hash = .payload_hash,
+    program_id = .program_id,
+    route_id = .route_id,
+    registry_record_hash = .registry_record_hash,
+    ai_output_hash = sha256_text("the answer"),
+    job = NULL,
+    signed_at = body$request_signature$signed_at,
+    nonce = body$request_signature$nonce
+  )
+  expect_true(sodium::sig_verify(
+    preimage,
+    jsonlite::base64_dec(body$request_signature$signature),
+    jsonlite::base64_dec(.public_key)
+  ))
+})
+
 test_that("verdifax_verify_determinism signs", {
   need_sodium()
-  sent <- capture_requests(verdifax_verify_determinism(
+  sent <- capture_requests(result <- verdifax_verify_determinism(
     client = signed_client(),
     payload = "hello",
     program_id = .program_id,
@@ -147,7 +293,9 @@ test_that("verdifax_verify_determinism signs", {
     registry_record_hash = .registry_record_hash
   ))
   expect_match(sent[[1]]$url, "/execute/verify-determinism$")
+  expect_setequal(names(sent[[1]]$body), c("signed_request", "request_signature"))
   expect_true(signature_verifies(sent[[1]]$body))
+  expect_identical(result$signed_request, sent[[1]]$body$signed_request)
 })
 
 test_that("an unsigned determinism check sends no request_signature", {
@@ -165,7 +313,7 @@ test_that("non-ASCII text hashes its UTF-8 bytes", {
   need_sodium()
   text <- "café 世界 \U0001f600"
   sent <- capture_requests(attest(signed_client(), text))
-  expect_equal(sent[[1]]$body$payload_text, enc2utf8(text))
+  expect_equal(signed_fields(sent[[1]]$body)$payload_text, enc2utf8(text))
   expect_true(signature_verifies(sent[[1]]$body))
 })
 
@@ -174,14 +322,14 @@ test_that("Latin-1 text is signed as the UTF-8 that is sent", {
   text <- "caf\xe9"
   Encoding(text) <- "latin1"
   sent <- capture_requests(attest(signed_client(), text))
-  expect_equal(sent[[1]]$body$payload_text, "café")
+  expect_equal(signed_fields(sent[[1]]$body)$payload_text, "café")
   expect_true(signature_verifies(sent[[1]]$body))
 })
 
 test_that("a UTF-8 raw payload is sent and hashed as text", {
   need_sodium()
   sent <- capture_requests(attest(signed_client(), charToRaw("hello")))
-  expect_equal(sent[[1]]$body$payload_text, "hello")
+  expect_equal(signed_fields(sent[[1]]$body)$payload_text, "hello")
   expect_true(signature_verifies(sent[[1]]$body))
 })
 
@@ -189,8 +337,9 @@ test_that("a binary raw payload hashes the base64 string, not the decoded bytes"
   need_sodium()
   sent <- capture_requests(attest(signed_client(), as.raw(c(0xff, 0xfe, 0x00))))
   body <- sent[[1]]$body
-  expect_null(body[["payload_text"]])
-  expect_equal(body[["payload"]], "//4A")
+  request <- signed_fields(body)
+  expect_null(request[["payload_text"]])
+  expect_equal(request[["payload"]], "//4A")
   expect_true(signature_verifies(body))
 })
 
@@ -198,7 +347,7 @@ test_that("a long binary payload hashes its base64 line breaks as sent", {
   need_sodium()
   sent <- capture_requests(attest(signed_client(), as.raw(rep(c(0xff, 0x00), 100))))
   body <- sent[[1]]$body
-  expect_match(body[["payload"]], "\n", fixed = TRUE)
+  expect_match(signed_fields(body)[["payload"]], "\n", fixed = TRUE)
   expect_true(signature_verifies(body))
 })
 
@@ -237,22 +386,187 @@ test_that("the nonce differs between calls", {
   })
   first <- sent[[1]]$body$request_signature
   second <- sent[[2]]$body$request_signature
+  expect_match(first$signed_at, "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$")
   expect_false(identical(first$nonce, second$nonce))
   expect_false(identical(first$signature, second$signature))
 })
 
-test_that("register sends the public key and proof, and clear clears it", {
+# Checks an approval the way the server does: signed by `public_key` over
+# the new key, written out independently of the SDK.
+change_verifies <- function(change, new_key, public_key = .public_key) {
+  fields <- lapply(
+    list("verdifax.request-key-change.v1", new_key, change$signed_at, change$nonce),
+    charToRaw
+  )
+  signed <- Reduce(function(a, b) c(a, as.raw(0), b), fields)
+  sodium::sig_verify(
+    signed, jsonlite::base64_dec(change$signature), jsonlite::base64_dec(public_key)
+  )
+}
+
+test_that("register sends the public key and proof", {
   need_sodium()
   client <- signed_client()
-  sent <- capture_requests({
-    verdifax_register_request_key(client)
-    verdifax_clear_request_key(client)
-  })
+  sent <- capture_requests(verdifax_register_request_key(client))
   expect_equal(sent[[1]]$method, "POST")
   expect_match(sent[[1]]$url, "/keys/request-key$")
   expect_equal(sent[[1]]$body, list(public_key = .public_key, proof = .proof))
-  expect_equal(sent[[2]]$method, "DELETE")
-  expect_match(sent[[2]]$url, "/keys/request-key$")
+})
+
+test_that("clear sends the current key's approval as the DELETE body", {
+  need_sodium()
+  sent <- capture_requests(verdifax_clear_request_key(signed_client()))
+  expect_equal(sent[[1]]$method, "DELETE")
+  expect_match(sent[[1]]$url, "/keys/request-key$")
+  expect_named(sent[[1]]$body, "change")
+  change <- sent[[1]]$body$change
+  expect_setequal(names(change), c("signature", "signed_at", "nonce"))
+  expect_match(change$nonce, "^[0-9a-f]{32}$")
+  expect_true(change_verifies(change, ""))
+})
+
+test_that("after a clear the client and its copies send unsigned requests", {
+  need_sodium()
+  client <- signed_client()
+  copy <- client
+  capture_requests(verdifax_clear_request_key(client))
+  sent <- capture_requests({
+    result <- attest(client, "hello")
+    attest(copy, "hello")
+    verdifax_execute_batch(client, list(list(
+      payload = "x", program_id = .program_id, route_id = .route_id,
+      registry_record_hash = .registry_record_hash
+    )))
+    verdifax_verify_determinism(
+      client = client, payload = "hello", program_id = .program_id,
+      route_id = .route_id, registry_record_hash = .registry_record_hash
+    )
+  })
+  expect_equal(sent[[1]]$body$payload_text, "hello")
+  expect_null(sent[[1]]$body$signed_request)
+  expect_null(sent[[1]]$body$request_signature)
+  expect_null(sent[[2]]$body$request_signature)
+  expect_null(sent[[3]]$body$runs[[1]]$request_signature)
+  expect_null(sent[[4]]$body$request_signature)
+  expect_null(result$signed_request)
+})
+
+test_that("an admin clear keeps the client's key, because the id can be any API key", {
+  need_sodium()
+  client <- signed_client()
+  sent <- capture_requests({
+    verdifax_admin_clear_request_key(client, 7)
+    attest(client, "hello")
+  })
+  expect_equal(sent[[1]]$method, "DELETE")
+  expect_match(sent[[1]]$url, "/admin/keys/7/request-key$")
+  expect_null(sent[[1]]$body)
+  expect_true(signature_verifies(sent[[2]]$body))
+})
+
+test_that("a client that dropped its key cannot register, rotate or approve", {
+  need_sodium()
+  client <- signed_client()
+  sent <- capture_requests({
+    verdifax_clear_request_key(client)
+    verdifax_clear_request_key(client)
+    expect_error(verdifax_register_request_key(client), "signing_key")
+    expect_error(verdifax_rotate_request_key(client, as.raw(rep(2L, 32))), "signing_key")
+  })
+  expect_length(sent, 2)
+  expect_null(sent[[2]]$body)
+})
+
+test_that("a refused clear keeps signing", {
+  need_sodium()
+  client <- signed_client()
+  refuse <- function(req) {
+    httr2::response(
+      status_code = 403,
+      headers = "Content-Type: application/json",
+      body = charToRaw("{\"ok\":false,\"error\":\"the current request key must approve this change\"}")
+    )
+  }
+  httr2::with_mocked_responses(refuse, expect_error(
+    verdifax_clear_request_key(client),
+    "must approve",
+    class = "httr2_http_403"
+  ))
+  sent <- capture_requests(attest(client, "hello"))
+  expect_true(signature_verifies(sent[[1]]$body))
+})
+
+test_that("clear on an unsigned client sends no body, as before", {
+  sent <- capture_requests(verdifax_clear_request_key(unsigned_client()))
+  expect_equal(sent[[1]]$method, "DELETE")
+  expect_null(sent[[1]]$body)
+})
+
+test_that("rotate sends the new key, its proof and the current key's approval", {
+  need_sodium()
+  client <- signed_client()
+  new_key <- as.raw(rep(2L, 32))
+  registration <- verdifax_request_key_registration_body(new_key)
+  sent <- capture_requests(result <- verdifax_rotate_request_key(client, new_key))
+  expect_equal(sent[[1]]$method, "POST")
+  expect_match(sent[[1]]$url, "/keys/request-key$")
+  body <- sent[[1]]$body
+  expect_setequal(names(body), c("public_key", "proof", "change"))
+  expect_equal(body$public_key, registration$public_key)
+  expect_equal(body$proof, registration$proof)
+  expect_true(change_verifies(body$change, body$public_key))
+  expect_error(change_verifies(body$change, body$public_key, public_key = body$public_key))
+  expect_true(result$ok)
+})
+
+test_that("after a rotate the client and its copies sign with the new key", {
+  need_sodium()
+  client <- signed_client()
+  copy <- client
+  new_key <- as.raw(rep(2L, 32))
+  new_public <- jsonlite::base64_dec(verdifax_request_key_registration_body(new_key)$public_key)
+  capture_requests(verdifax_rotate_request_key(client, new_key))
+  sent <- capture_requests({
+    attest(client, "hello")
+    attest(copy, "hello")
+  })
+  expect_true(signature_verifies(sent[[1]]$body, new_public))
+  expect_true(signature_verifies(sent[[2]]$body, new_public))
+  expect_error(signature_verifies(sent[[1]]$body))
+})
+
+test_that("a refused rotate keeps the current key", {
+  need_sodium()
+  client <- signed_client()
+  refuse <- function(req) {
+    httr2::response(
+      status_code = 403,
+      headers = "Content-Type: application/json",
+      body = charToRaw("{\"ok\":false,\"error\":\"the current request key must approve this change\"}")
+    )
+  }
+  httr2::with_mocked_responses(refuse, expect_error(
+    verdifax_rotate_request_key(client, as.raw(rep(2L, 32))),
+    "must approve",
+    class = "httr2_http_403"
+  ))
+  sent <- capture_requests(attest(client, "hello"))
+  expect_true(signature_verifies(sent[[1]]$body))
+})
+
+test_that("rotate is refused before sending when it cannot be approved", {
+  sent <- capture_requests(
+    expect_error(verdifax_rotate_request_key(unsigned_client(), as.raw(rep(2L, 32))), "signing_key")
+  )
+  expect_length(sent, 0)
+})
+
+test_that("rotate refuses a bad new key before sending", {
+  need_sodium()
+  sent <- capture_requests(
+    expect_error(verdifax_rotate_request_key(signed_client(), raw(3)), "32 raw bytes")
+  )
+  expect_length(sent, 0)
 })
 
 test_that("register needs a signing key", {
