@@ -665,7 +665,7 @@ test_that("every account route in sdk-parity.json has its R function", {
   parity <- jsonlite::fromJSON(testthat::test_path("sdk-parity.json"), simplifyVector = FALSE)
   routes <- c(parity$routes, parity$admin_routes)
   account <- routes[grepl(" /(account|admin/accounts)", names(routes))]
-  expect_length(account, 16)
+  expect_length(account, 23)
   for (route in names(account)) {
     for (name in unlist(account[[route]]$r)) {
       expect_true(name %in% getNamespaceExports("verdifax"), info = paste(route, name))

@@ -199,7 +199,9 @@ verdifax_list_account_runs <- function(client, limit = NULL, offset = NULL) {
 #'
 #' @return Parsed API response list as from `verdifax_export_runs()`, with
 #'   `account_id` and, once the account has policy documents,
-#'   `account_policy_documents` and `account_policy_history`. Each row holds
+#'   `account_policy_documents` and `account_policy_history`, and
+#'   `signoffs`, the account's whole chain of sign-offs, oldest first, as
+#'   `verdifax_get_signoff_history()` returns it. Each row holds
 #'   `api_key_id`, the id of the account's key that requested the run.
 #'
 #' @export

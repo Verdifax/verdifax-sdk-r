@@ -142,6 +142,13 @@ GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 42
 | `verdifax_test_account_policy()` | `POST /account/policies/test` |
 | `verdifax_get_account_policy_history()` | `GET /account/policies/history` |
 | `verdifax_activate_account_policy()` | `GET /account/policies`, then `POST /account/policies/{document_hash}/activate` |
+| `verdifax_register_approver()` | `POST /account/approvers` |
+| `verdifax_list_approvers()` | `GET /account/approvers` |
+| `verdifax_revoke_approver()` | `DELETE /account/approvers/{id}` |
+| `verdifax_get_newest_signoff()` | `GET /signoffs/newest`, or `GET /account/signoffs/newest` with `as_owner = TRUE` |
+| `verdifax_sign_off()` | `GET /signoffs/newest`, then `POST /signoffs`; with `as_owner = TRUE`, `GET /account/signoffs/newest`, then `POST /account/signoffs` |
+| `verdifax_get_signoffs()` | `GET /runs/{id}/signoffs`, or `GET /account/runs/{id}/signoffs` with `as_owner = TRUE` |
+| `verdifax_get_signoff_history()` | `GET /account/signoffs/history` |
 | `verdifax_admin_create_key()` | `POST /admin/keys` |
 | `verdifax_admin_list_keys()` | `GET /admin/keys` |
 | `verdifax_admin_revoke_key()` | `DELETE /admin/keys/{id}` |
@@ -150,9 +157,9 @@ GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 42
 | `verdifax_admin_create_account()` | `POST /admin/accounts` |
 | `verdifax_admin_list_accounts()` | `GET /admin/accounts` |
 
-These make no request: `verdifax_client()`, `verdifax_from_env()`, `verdifax_job()`, `verdifax_capture_environment()`, `verdifax_format_provider_payload()`, `verdifax_sign_request()`, `verdifax_request_key_registration_body()`, `verdifax_request_signature_preimage()`, `verdifax_policy_activation_preimage()`, `verdifax_policy_activation_approval()`, `verdifax_generate_request_key()`, `verdifax_validate_hex64()`, `verdifax_validate_route_id()`, `verdifax_dse_dispatch_hash()`, `verdifax_dcae_closure_hash()`, `verdifax_cres_receipt_hash()` and `verdifax_run_statuses()`.
+These make no request: `verdifax_client()`, `verdifax_from_env()`, `verdifax_job()`, `verdifax_capture_environment()`, `verdifax_format_provider_payload()`, `verdifax_sign_request()`, `verdifax_request_key_registration_body()`, `verdifax_request_signature_preimage()`, `verdifax_policy_activation_preimage()`, `verdifax_policy_activation_approval()`, `verdifax_signoff_preimage()`, `verdifax_approver_key_proof()`, `verdifax_generate_request_key()`, `verdifax_validate_hex64()`, `verdifax_validate_route_id()`, `verdifax_dse_dispatch_hash()`, `verdifax_dcae_closure_hash()`, `verdifax_cres_receipt_hash()` and `verdifax_run_statuses()`.
 
-`verdifax_get_run_artifacts()`, `verdifax_get_public_bundle()`, `verdifax_get_public_bundle_by_token()`, `verdifax_get_policy_history()` and `verdifax_get_account_policy_history()` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
+`verdifax_get_run_artifacts()`, `verdifax_get_public_bundle()`, `verdifax_get_public_bundle_by_token()`, `verdifax_get_policy_history()`, `verdifax_get_account_policy_history()`, `verdifax_get_signoffs()` and `verdifax_get_signoff_history()` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
 
 ## Runs
 
@@ -362,9 +369,65 @@ An owner key cannot run anything. The server refuses it with HTTP 403 on the rou
 
 Every change to the account's policy must be signed by the owner key's request key, over the account's chain, for example `account-7`. `verdifax_activate_account_policy()` reads that chain and its newest change from `verdifax_list_account_policies()` and signs as `verdifax_activate_policy()` does. A client without a `signing_key` is refused before anything is sent, because the server refuses an unsigned change. Rolling back is activating an earlier document, and `verdifax_get_account_policy_history()` returns the chain of changes for `verdifax-verify --policy-history`.
 
-`verdifax_export_account_runs()` and `verdifax_export_account_runs_csv()` take the same period and `job_id` as `verdifax_export_runs()`. The JSON export also holds `account_id` and, once the account has policy documents, `account_policy_documents` and `account_policy_history`. `verdifax_list_account_runs()` pages through the same runs with `limit` and `offset`. Every row and run holds `api_key_id`, so you can tell which of the account's keys requested it.
+`verdifax_export_account_runs()` and `verdifax_export_account_runs_csv()` take the same period and `job_id` as `verdifax_export_runs()`. The JSON export also holds `account_id`, `signoffs`, the account's whole chain of sign-offs, and, once the account has policy documents, `account_policy_documents` and `account_policy_history`. `verdifax_list_account_runs()` pages through the same runs with `limit` and `offset`. Every row and run holds `api_key_id`, so you can tell which of the account's keys requested it.
 
 `verdifax_revoke_account_key()` revokes a member key. A key in another account, or an owner key, answers HTTP 404. A member key on a trial account needs its own request key before it seals anything, as every trial key does: see Request signing. An admin can also put a new key in an existing account with `verdifax_admin_create_key(admin, name, account_id = created$account$id)`. `verdifax_admin_list_accounts()` lists every account with its key counts.
+
+## Sign-off
+
+A sign-off is an approver's decision, approve or reject, on one exact result: a completed run's record, a refused or halted run's receipt, or a whole job by its final step. The account's owner registers approver keys. The approver signs on their own machine with the approver key, which is never sent, and any key in the account can submit the sign-off.
+
+```r
+# On the approver's machine: make the key pair and its proof. Store
+# private_key as a secret: it is 32 raw bytes and is never sent.
+approver_key <- verdifax_generate_request_key()$private_key
+proof <- verdifax_approver_key_proof(approver_key) # public_key and proof
+
+# The owner registers the approver from the proof alone, and never holds
+# the private key. A proof that does not verify is refused before sending.
+owner <- verdifax_client(api_key = owner_secret)
+approver <- verdifax_register_approver(owner, proof, "Dana, credit review")
+verdifax_list_approvers(owner)$approvers
+
+# The digest of a completed run's record is the anchored_digest of its
+# bundle_anchor.
+member <- verdifax_client(api_key = member_secret)
+bundle <- jsonlite::fromJSON(verdifax_get_run_artifacts(member, 42))
+signoff <- verdifax_sign_off(
+  member,
+  target = list(kind = "record", run_id = 42, digest = bundle$bundle_anchor$anchored_digest),
+  decision = "approve",
+  approver_key = approver_key,
+  note = "Checked against the loan file."
+)
+signoff$sequence
+
+# The sign-offs on the run, oldest first, as the exact text the server sent.
+# The newest is the decision in force. Save it and check it offline beside
+# the run's record.
+writeLines(verdifax_get_signoffs(member, 42), "signoffs.json", sep = "")
+writeLines(verdifax_get_run_artifacts(member, 42), "bundle.json", sep = "")
+# verdifax-verify --signoff signoffs.json bundle.json
+
+# The owner saves the account's whole chain and checks it offline.
+writeLines(verdifax_get_signoff_history(owner), "signoff-history.json", sep = "")
+# verdifax-verify --signoff-history signoff-history.json
+
+# The owner revokes an approver key. Its earlier sign-offs stay on the record.
+verdifax_revoke_approver(owner, approver$id)
+```
+
+An approver key is registered by the account's owner and is never a request key in the same account, so the key that requested a run cannot sign it off. The server refuses one with HTTP 409, and `verdifax_register_approver()` and `verdifax_sign_off()` refuse the client's own `signing_key` before sending. `verdifax_register_approver()` takes either the list `verdifax_approver_key_proof()` returns, checked here, or the approver's private key, from which it makes the proof here.
+
+A sign-off shows that the holder of a registered approver key signed that decision on that exact result, and that Verdifax logged it on the public log. It does not show the review was careful, the result right, or who the person is: a key is not an identity. It gates nothing on its own. A later sign-off on the same result supersedes the earlier one, and nothing is deleted. Verdifax did not review the result.
+
+The target names the result by what its public-log entry covers. For a record, `kind = "record"` and `digest` is the `anchored_digest` of the `bundle_anchor` in the text from `verdifax_get_run_artifacts()`. For a receipt, `kind = "receipt"` and `digest` is the receipt's `hash`. For a job, `kind = "job"`, `run_id` is the final step's run, `job_id` names the job, and `digest` is the final step's record digest, read as for a record. A target the server cannot match to a result of the account with that digest answers HTTP 409.
+
+`verdifax_sign_off()` reads the account's chain and newest sign-off with `verdifax_get_newest_signoff()`, then signs `verdifax.signoff.v1`, the chain, the newest sign-off, the target, the decision, the note's hash, the time and a fresh nonce, joined by zero bytes. The note's text never leaves this machine: only its SHA-256 is sent, as `note_hash`. With no note, `note_hash` is left out, and an empty note is refused. Bad input is refused before anything is sent. An HTTP 409 can also mean another sign-off came first, and the call stops with the server's message and is not retried. The call also stops with an error when the record the server returns does not carry the signature, `approver_key`, `decision`, `previous_signoff_hash` and `target` that were sent. `verdifax_signoff_preimage()` and `verdifax_approver_key_proof()` build the signed bytes and the proof without sending anything.
+
+A member key submits on `/signoffs`, for any result of its account, and reads `/runs/{id}/signoffs` for the runs it made. The owner key passes `as_owner = TRUE` to `verdifax_get_newest_signoff()`, `verdifax_sign_off()` and `verdifax_get_signoffs()` to use the `/account` routes, which cover every run of the account. The owner's `verdifax_export_account_runs()` also holds `signoffs`, the account's whole chain.
+
+The verifier reads sign-offs since v0.22.0: `verdifax-verify --signoff FILE` checks a record's or receipt's sign-offs as `verdifax_get_signoffs()` returns them, and `--signoff-history FILE` checks the account's whole chain.
 
 ## Provider helpers
 
