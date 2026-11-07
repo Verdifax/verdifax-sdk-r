@@ -13,6 +13,8 @@
 .CRES_PREIMAGE_VERSION <- "verdifax.cres.v1"
 .CRES_ENGINE_VERSION <- "verdifax-cres/1.0.0"
 
+# The one SHA-256 helper in the package, also used for request signing. It
+# needs only openssl, so these formulas work without the sodium package.
 .sha256_hex <- function(preimage) {
   paste(as.character(openssl::sha256(.utf8_bytes(preimage))), collapse = "")
 }

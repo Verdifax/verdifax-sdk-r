@@ -5,7 +5,8 @@
 # This file holds the client, environment capture, attestation, the
 # determinism check and request signing. R/runs.R holds run retrieval,
 # evidence export and batch runs. R/jobs.R holds job blocks and the job
-# helper. R/routes.R holds every other route and the provider and admin
+# helper. R/policies.R holds the policy routes and the policy_context
+# checks. R/routes.R holds every other route and the provider and admin
 # helpers. R/section0.R holds the canonical hash formulas. README.md lists
 # every exported function.
 #
@@ -16,6 +17,7 @@
 # Dependencies (declared in DESCRIPTION):
 #   httr2 (>= 1.0.0)
 #   jsonlite (>= 1.8.0)
+#   openssl, for SHA-256, here and in R/section0.R
 #   sodium (Suggests, needed only for request signing)
 
 # ── Module-level constants ──────────────────────────────────────────────────
@@ -30,7 +32,25 @@
 .REQUEST_SIGNATURE_VERSION <- "2"
 .REQUEST_KEY_PROOF_FORM <- "verdifax.request-key.v1"
 .REQUEST_KEY_CHANGE_FORM <- "verdifax.request-key-change.v1"
+.POLICY_ACTIVATION_FORM <- "verdifax.policy-activation.v1"
 .JOB_FORM <- "verdifax.job.v1"
+# Every top-level field a run request may hold. The server ignores a field it
+# does not know, so a misspelt one would be dropped with no error: a batch
+# row with any other name is refused here instead. A test holds this list to
+# execute_fields in the shared sdk-parity.json.
+.EXECUTE_FIELDS <- c(
+  "payload", "payload_text", "program_id", "route_id", "registry_record_hash",
+  "ai_output_text", "attested_context", "reproducibility_context",
+  "request_substance", "authorization_chain", "regulatory_scaffolding",
+  "causal_graph", "request_signature", "signed_request", "job",
+  "policy_context", "expected_policy_hash"
+)
+# Every field of attested_context, for the same reason.
+.ATTESTED_CONTEXT_FIELDS <- c(
+  "attested", "actor_id", "actor_role", "authorization_policy", "actor_signature",
+  "model_provider", "model_name", "model_version", "model_temperature",
+  "prompt_hash", "decision_kind", "decision_result", "decision_note"
+)
 .SIGNING_KEY_BYTES <- 32L
 .DEFAULT_MAX_RETRIES <- 3L
 .DEFAULT_RETRY_BASE_DELAY_SEC <- 0.2
@@ -53,7 +73,8 @@
 #'   Ed25519 private key, from `verdifax_generate_request_key()`. When
 #'   set, `verdifax_attest()`, `verdifax_execute()`,
 #'   `verdifax_execute_batch()`, `verdifax_verify_determinism()` and the
-#'   provider helpers sign their requests. Needs the `sodium` package.
+#'   provider helpers sign their requests, and `verdifax_activate_policy()`
+#'   signs the change it asks for. Needs the `sodium` package.
 #'   The key is never sent to the server, and the returned list holds it
 #'   only inside a closure, so printing the client does not show it.
 #' @param user_agent Optional `User-Agent` value.
@@ -342,13 +363,14 @@ verdifax_capture_environment <- function(declared_seeds = list(),
 }
 
 # Posts one execute body. A refused or halted run answers with an error
-# status and still leaves a record, so the same error goes on, holding that
-# record's hash and the text that was signed.
+# status and still leaves a record, so the same error goes on, holding the
+# server's message, that record's hash and the text that was signed.
 .post_execute <- function(client, path, body) {
   wire <- .attach_signature(client, body)
   signed_request <- wire[["signed_request"]]
+  req <- httr2::req_error(.build_request(client, path, wire), body = .error_detail)
   result <- tryCatch(
-    .perform(.build_request(client, path, wire)),
+    .perform(req),
     httr2_http = function(error) {
       error$record_hash <- .error_record_hash(error)
       error$signed_request <- signed_request
@@ -376,8 +398,12 @@ verdifax_capture_environment <- function(declared_seeds = list(),
 #' @param ai_output_text Optional AI output text for AIVP
 #'   governance.
 #' @param attested_context Optional named list of caller-attested actor,
-#'   model and decision fields, recorded in the audit bundle. `attested`
-#'   is set from whether any other field has a value.
+#'   model and decision fields, recorded in the audit bundle: `actor_id`,
+#'   `actor_role`, `authorization_policy`, `actor_signature`,
+#'   `model_provider`, `model_name`, `model_version`, `model_temperature`,
+#'   `prompt_hash`, `decision_kind`, `decision_result` and `decision_note`.
+#'   Any other name is refused before sending. `attested` is set from
+#'   whether any other field has a value.
 #' @param request_substance Optional named list of prompt, output, cost,
 #'   latency and origin metadata, recorded as supplied. Leave out
 #'   `origin$source_ip_hash` and `origin$user_agent_hash`: the server
@@ -393,6 +419,24 @@ verdifax_capture_environment <- function(declared_seeds = list(),
 #'   `external_previous` and `final`. Bad names are refused before
 #'   sending. The hash lists are sorted and repeats removed for you.
 #'   `verdifax_job_step()` builds this for you.
+#' @param policy_context Optional named list of what this request declares
+#'   for your active policy's rules to read, with only these fields:
+#'   `actor_type` (`"agent"`, `"user"`, `"service"` or `"system"`),
+#'   `mfa_satisfied` (`TRUE` or `FALSE`), `session_age_seconds` (a whole
+#'   number, not negative), `object_type` (`"text"`, `"transaction"`,
+#'   `"code"`, `"data"`, `"model"` or `"file"`), `object_id` (text of at
+#'   most 256 bytes) and `classification` (`"PUBLIC"`, `"INTERNAL"`,
+#'   `"CONFIDENTIAL"`, `"RESTRICTED"`, `"TOP_SECRET"` or `"TS_SCI"`). An
+#'   unknown field or a value outside these is refused before sending, so a
+#'   misspelt field is never dropped. `actor_type`, `mfa_satisfied` and
+#'   `session_age_seconds` describe the attested actor, so a set
+#'   `actor_type`, `mfa_satisfied = TRUE` or a non-zero
+#'   `session_age_seconds` needs an `attested_context` with at least one
+#'   field set, such as `actor_id`. The rules judge what you declare here;
+#'   they cannot show it is true.
+#' @param expected_policy_hash Optional 64-char lowercase hex `policy_hash`
+#'   of the policy you expect to be active. When another policy is active,
+#'   the server refuses the run with HTTP 409.
 #'
 #' @return Parsed API response list with `ok`, `run_id`, `record_hash`,
 #'   `manifest`, etc. A signed call also has `signed_request`, the exact
@@ -414,7 +458,9 @@ verdifax_attest <- function(client,
                             authorization_chain = NULL,
                             regulatory_scaffolding = NULL,
                             causal_graph = NULL,
-                            job = NULL) {
+                            job = NULL,
+                            policy_context = NULL,
+                            expected_policy_hash = NULL) {
   body <- .build_execute_body(
     payload = payload,
     program_id = program_id,
@@ -427,7 +473,9 @@ verdifax_attest <- function(client,
     authorization_chain = authorization_chain,
     regulatory_scaffolding = regulatory_scaffolding,
     causal_graph = causal_graph,
-    job = job
+    job = job,
+    policy_context = policy_context,
+    expected_policy_hash = expected_policy_hash
   )
   .post_execute(client, "/execute", body)
 }
@@ -467,7 +515,9 @@ verdifax_verify_determinism <- function(client,
                                         request_substance = NULL,
                                         authorization_chain = NULL,
                                         regulatory_scaffolding = NULL,
-                                        causal_graph = NULL) {
+                                        causal_graph = NULL,
+                                        policy_context = NULL,
+                                        expected_policy_hash = NULL) {
   body <- .build_execute_body(
     payload = payload,
     program_id = program_id,
@@ -479,7 +529,9 @@ verdifax_verify_determinism <- function(client,
     request_substance = request_substance,
     authorization_chain = authorization_chain,
     regulatory_scaffolding = regulatory_scaffolding,
-    causal_graph = causal_graph
+    causal_graph = causal_graph,
+    policy_context = policy_context,
+    expected_policy_hash = expected_policy_hash
   )
   .post_execute(client, "/execute/verify-determinism", body)
 }
@@ -681,10 +733,6 @@ verdifax_clear_request_key <- function(client) {
   .sha256_hex(.wire_string(payload))
 }
 
-.sha256_hex <- function(text) {
-  sodium::bin2hex(sodium::sha256(.utf8_bytes(text)))
-}
-
 .signing_time <- function() {
   format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
 }
@@ -814,6 +862,18 @@ verdifax_clear_request_key <- function(client) {
   list(signature = .base64(signer$sign(preimage)), signed_at = signed_at, nonce = nonce)
 }
 
+# The request key's approval of a policy change: the `signature` object of
+# the activate body. chain_id ties it to one API key's chain of changes.
+.policy_activation <- function(signer, chain_id, document_hash, previous_activation_hash,
+                               signed_at = NULL, nonce = NULL) {
+  signed_at <- signed_at %||% .signing_time()
+  nonce <- nonce %||% .signing_nonce()
+  preimage <- verdifax_policy_activation_preimage(
+    chain_id, document_hash, previous_activation_hash, signed_at, nonce
+  )
+  list(signature = .base64(signer$sign(preimage)), signed_at = signed_at, nonce = nonce)
+}
+
 
 # ── Internal: request body builder ──────────────────────────────────────────
 
@@ -828,7 +888,9 @@ verdifax_clear_request_key <- function(client) {
                                 authorization_chain = NULL,
                                 regulatory_scaffolding = NULL,
                                 causal_graph = NULL,
-                                job = NULL) {
+                                job = NULL,
+                                policy_context = NULL,
+                                expected_policy_hash = NULL) {
   verdifax_validate_hex64(program_id, "program_id")
   verdifax_validate_hex64(registry_record_hash, "registry_record_hash")
   verdifax_validate_route_id(route_id)
@@ -848,7 +910,9 @@ verdifax_clear_request_key <- function(client) {
     authorization_chain = authorization_chain,
     regulatory_scaffolding = regulatory_scaffolding,
     causal_graph = causal_graph,
-    job = job
+    job = job,
+    policy_context = policy_context,
+    expected_policy_hash = expected_policy_hash
   )
 }
 
@@ -875,8 +939,19 @@ verdifax_clear_request_key <- function(client) {
 }
 
 # The attested flag follows the fields, in all four SDKs, so a policy
-# that reads the flag sees what the caller declared.
+# that reads the flag sees what the caller declared. An unknown field is
+# refused, because the server would drop it with no error.
 .attested_block <- function(context) {
+  if (!is.list(context) || (length(context) > 0 && is.null(names(context)))) {
+    stop("attested_context must be a named list", call. = FALSE)
+  }
+  unknown <- setdiff(names(context), .ATTESTED_CONTEXT_FIELDS)
+  if (length(unknown) > 0) {
+    stop(
+      "attested_context has an unknown field: ", paste(unknown, collapse = ", "),
+      call. = FALSE
+    )
+  }
   context <- context[!vapply(context, is.null, logical(1))]
   fields <- context[setdiff(names(context), "attested")]
   context$attested <- any(vapply(fields, .is_provided, logical(1)))
@@ -892,7 +967,8 @@ verdifax_clear_request_key <- function(client) {
 
 # The fields of one execute body, with no checks on their values, so a
 # batch can leave a bad row for the server to report in its result. A job
-# block is the exception: .job_block() refuses a bad one here.
+# block, policy_context and expected_policy_hash are the exceptions: a bad
+# one is refused here, so a misspelt field is never dropped.
 .execute_fields <- function(payload,
                             program_id,
                             route_id,
@@ -904,7 +980,9 @@ verdifax_clear_request_key <- function(client) {
                             authorization_chain = NULL,
                             regulatory_scaffolding = NULL,
                             causal_graph = NULL,
-                            job = NULL) {
+                            job = NULL,
+                            policy_context = NULL,
+                            expected_policy_hash = NULL) {
   body <- list(
     program_id = program_id,
     route_id = route_id,
@@ -962,6 +1040,17 @@ verdifax_clear_request_key <- function(client) {
 
   if (!is.null(job)) {
     body$job <- .job_block(job)
+  }
+
+  if (!is.null(policy_context)) {
+    body$policy_context <- .policy_context_block(
+      policy_context, isTRUE(body$attested_context$attested)
+    )
+  }
+
+  if (!is.null(expected_policy_hash)) {
+    verdifax_validate_hex64(expected_policy_hash, "expected_policy_hash")
+    body$expected_policy_hash <- as.vector(expected_policy_hash)
   }
 
   body

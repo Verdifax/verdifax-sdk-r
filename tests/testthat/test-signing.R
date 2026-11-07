@@ -156,6 +156,66 @@ test_that("vector: the key change, byte for byte", {
   ))
 })
 
+test_that("vector: the policy activation preimage, byte for byte", {
+  preimage <- verdifax_policy_activation_preimage(
+    .vector$activation_chain_id, .vector$activation_document_hash,
+    .vector$activation_previous_hash, .vector$signed_at, .vector$nonce
+  )
+  expect_type(preimage, "raw")
+  expect_equal(paste(as.character(preimage), collapse = ""), .vector$activation_preimage_hex)
+})
+
+test_that("vector: the policy activation approval, byte for byte", {
+  need_sodium()
+  approval <- verdifax_policy_activation_approval(
+    vector_seed(), .vector$activation_chain_id, .vector$activation_document_hash,
+    .vector$activation_previous_hash, .vector$signed_at, .vector$nonce
+  )
+  expect_equal(approval, list(
+    signature = .vector$activation_signature,
+    signed_at = .vector$signed_at,
+    nonce = .vector$nonce
+  ))
+  internal <- verdifax:::.policy_activation(
+    vector_signer(), .vector$activation_chain_id, .vector$activation_document_hash,
+    .vector$activation_previous_hash, .vector$signed_at, .vector$nonce
+  )
+  expect_equal(internal, approval)
+})
+
+test_that("a policy activation approval defaults to now and a fresh nonce", {
+  need_sodium()
+  first <- verdifax_policy_activation_approval(
+    vector_seed(), "api-key-7", strrep("a", 64), strrep("0", 64)
+  )
+  second <- verdifax_policy_activation_approval(
+    vector_seed(), "api-key-7", strrep("a", 64), strrep("0", 64)
+  )
+  expect_match(first$signed_at, "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$")
+  expect_match(first$nonce, "^[0-9a-f]{32}$")
+  expect_false(identical(first$nonce, second$nonce))
+  expect_false(grepl("\n", first$signature, fixed = TRUE))
+})
+
+test_that("the policy activation helpers refuse bad fields", {
+  expect_error(
+    verdifax_policy_activation_preimage("c", strrep("A", 64), strrep("0", 64), "t", "n"),
+    "document_hash"
+  )
+  expect_error(
+    verdifax_policy_activation_preimage("c", strrep("a", 64), "short", "t", "n"),
+    "previous_activation_hash"
+  )
+  expect_error(
+    verdifax_policy_activation_preimage(c("a", "b"), strrep("a", 64), strrep("0", 64), "t", "n"),
+    "chain_id"
+  )
+  expect_error(
+    verdifax_policy_activation_approval(raw(3), "c", strrep("a", 64), strrep("0", 64)),
+    "32 raw bytes"
+  )
+})
+
 test_that("the job block the SDK builds gives the vector's job fields", {
   need_sodium()
   job <- verdifax:::.job_block(list(

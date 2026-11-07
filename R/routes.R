@@ -132,7 +132,9 @@ verdifax_execute <- function(client,
                              authorization_chain = NULL,
                              regulatory_scaffolding = NULL,
                              causal_graph = NULL,
-                             job = NULL) {
+                             job = NULL,
+                             policy_context = NULL,
+                             expected_policy_hash = NULL) {
   verdifax_attest(
     client = client,
     payload = payload,
@@ -146,7 +148,9 @@ verdifax_execute <- function(client,
     authorization_chain = authorization_chain,
     regulatory_scaffolding = regulatory_scaffolding,
     causal_graph = causal_graph,
-    job = job
+    job = job,
+    policy_context = policy_context,
+    expected_policy_hash = expected_policy_hash
   )[["manifest"]]
 }
 
@@ -490,7 +494,8 @@ verdifax_format_provider_payload <- function(provider, prompt, response) {
 }
 
 .attest_provider_response <- function(client, provider, prompt, response, program_id, route_id,
-                                      registry_record_hash, govern, job = NULL) {
+                                      registry_record_hash, govern, job = NULL,
+                                      policy_context = NULL, expected_policy_hash = NULL) {
   if (!is.character(response) || length(response) != 1 || !nzchar(response)) {
     stop("response is required for attestation", call. = FALSE)
   }
@@ -502,13 +507,17 @@ verdifax_format_provider_payload <- function(provider, prompt, response) {
     registry_record_hash = registry_record_hash,
     ai_output_text = if (isTRUE(govern)) response else NULL,
     attested_context = list(actor_role = "ai_assistant", model_provider = provider),
-    job = job
+    job = job,
+    policy_context = policy_context,
+    expected_policy_hash = expected_policy_hash
   )
 }
 
 #' Attest an Anthropic Claude prompt and response.
 #'
-#' Attests the two as one payload, with provider `"anthropic"`.
+#' Attests the two as one payload, with provider `"anthropic"`. Its
+#' attested context sets `actor_role` and `model_provider`, so it counts as
+#' attested and `policy_context` can hold any of its fields.
 #'
 #' @inheritParams verdifax_attest
 #' @param prompt The prompt text.
@@ -521,15 +530,19 @@ verdifax_format_provider_payload <- function(provider, prompt, response) {
 #'
 #' @export
 verdifax_attest_claude_response <- function(client, prompt, response, program_id, route_id,
-                                            registry_record_hash, govern = FALSE, job = NULL) {
+                                            registry_record_hash, govern = FALSE, job = NULL,
+                                            policy_context = NULL, expected_policy_hash = NULL) {
   .attest_provider_response(
-    client, "anthropic", prompt, response, program_id, route_id, registry_record_hash, govern, job
+    client, "anthropic", prompt, response, program_id, route_id, registry_record_hash, govern, job,
+    policy_context, expected_policy_hash
   )
 }
 
 #' Attest an OpenAI prompt and response.
 #'
-#' Attests the two as one payload, with provider `"openai"`.
+#' Attests the two as one payload, with provider `"openai"`. Its attested
+#' context sets `actor_role` and `model_provider`, so it counts as attested
+#' and `policy_context` can hold any of its fields.
 #'
 #' @inheritParams verdifax_attest_claude_response
 #'
@@ -537,9 +550,11 @@ verdifax_attest_claude_response <- function(client, prompt, response, program_id
 #'
 #' @export
 verdifax_attest_openai_response <- function(client, prompt, response, program_id, route_id,
-                                            registry_record_hash, govern = FALSE, job = NULL) {
+                                            registry_record_hash, govern = FALSE, job = NULL,
+                                            policy_context = NULL, expected_policy_hash = NULL) {
   .attest_provider_response(
-    client, "openai", prompt, response, program_id, route_id, registry_record_hash, govern, job
+    client, "openai", prompt, response, program_id, route_id, registry_record_hash, govern, job,
+    policy_context, expected_policy_hash
   )
 }
 
@@ -597,4 +612,63 @@ verdifax_request_signature_preimage <- function(payload_hash, program_id, route_
     .REQUEST_SIGNATURE_FORM, payload_hash, program_id, route_id,
     registry_record_hash, signed_at, nonce
   ))
+}
+
+# A single string, as one field of a zero-joined preimage.
+.check_preimage_field <- function(value, name) {
+  if (!is.character(value) || length(value) != 1 || is.na(value)) {
+    stop(name, " must be a single string", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+#' The bytes a policy activation approval signs.
+#'
+#' @param chain_id The chain of this API key's policy changes, as
+#'   `verdifax_list_policies()` returns it, for example `"api-key-7"`.
+#' @param document_hash 64-char lowercase hex hash of the document to
+#'   activate.
+#' @param previous_activation_hash 64-char lowercase hex hash of the newest
+#'   change, or 64 zeros when there is none yet.
+#' @param signed_at The RFC 3339 UTC time.
+#' @param nonce The nonce as 32 lowercase hex characters.
+#'
+#' @return A raw vector: `verdifax.policy-activation.v1` and the fields in
+#'   this order, as UTF-8, joined by single zero bytes.
+#'
+#' @export
+verdifax_policy_activation_preimage <- function(chain_id, document_hash, previous_activation_hash,
+                                                signed_at, nonce) {
+  .check_preimage_field(chain_id, "chain_id")
+  verdifax_validate_hex64(document_hash, "document_hash")
+  verdifax_validate_hex64(previous_activation_hash, "previous_activation_hash")
+  .check_preimage_field(signed_at, "signed_at")
+  .check_preimage_field(nonce, "nonce")
+  .join_with_zero(list(
+    .POLICY_ACTIVATION_FORM, chain_id, document_hash, previous_activation_hash, signed_at, nonce
+  ))
+}
+
+#' Build a policy activation approval without sending anything.
+#'
+#' `verdifax_activate_policy()` builds this for you on a client with a
+#' `signing_key`. Needs the `sodium` package.
+#'
+#' @inheritParams verdifax_policy_activation_preimage
+#' @param signing_key The 32 raw bytes of the Ed25519 private key
+#'   registered as this API key's request key.
+#' @param signed_at Optional RFC 3339 UTC time in whole seconds. Defaults
+#'   to now.
+#' @param nonce Optional 32 lowercase hex characters. Defaults to fresh
+#'   random bytes. A nonce the server has already seen is refused.
+#'
+#' @return The `signature` object of the activate body: a list with
+#'   `signature`, `signed_at` and `nonce`.
+#'
+#' @export
+verdifax_policy_activation_approval <- function(signing_key, chain_id, document_hash,
+                                                previous_activation_hash, signed_at = NULL,
+                                                nonce = NULL) {
+  signer <- .request_signer(signing_key)
+  .policy_activation(signer, chain_id, document_hash, previous_activation_hash, signed_at, nonce)
 }

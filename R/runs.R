@@ -188,17 +188,23 @@ verdifax_export_runs_csv <- function(client, from = NULL, to = NULL, job_id = NU
 # ── Batch runs ──────────────────────────────────────────────────────────────
 
 .batch_row <- function(row) {
-  if (!is.list(row) || is.null(names(row))) {
+  if (!is.list(row) || is.null(names(row)) || any(!nzchar(names(row)))) {
     stop(
       "each run must be a named list with the arguments of verdifax_attest()",
       call. = FALSE
     )
   }
+  # The server ignores a field it does not know, so a misspelt one would be
+  # dropped with no error.
+  unknown <- setdiff(names(row), .EXECUTE_FIELDS)
+  if (length(unknown) > 0) {
+    stop("a run has an unknown field: ", paste(unknown, collapse = ", "), call. = FALSE)
+  }
   known <- c(
     "payload", "program_id", "route_id", "registry_record_hash",
     "reproducibility_context", "ai_output_text", "attested_context",
     "request_substance", "authorization_chain", "regulatory_scaffolding",
-    "causal_graph", "job"
+    "causal_graph", "job", "policy_context", "expected_policy_hash"
   )
   body <- .execute_fields(
     payload = row[["payload"]],
@@ -212,7 +218,9 @@ verdifax_export_runs_csv <- function(client, from = NULL, to = NULL, job_id = NU
     authorization_chain = row[["authorization_chain"]],
     regulatory_scaffolding = row[["regulatory_scaffolding"]],
     causal_graph = row[["causal_graph"]],
-    job = row[["job"]]
+    job = row[["job"]],
+    policy_context = row[["policy_context"]],
+    expected_policy_hash = row[["expected_policy_hash"]]
   )
   # A NULL element would reach the wire as {}, and the server would
   # refuse the whole batch instead of this row.
@@ -237,10 +245,12 @@ verdifax_export_runs_csv <- function(client, from = NULL, to = NULL, job_id = NU
 
 #' Send up to 1,000 runs in one request.
 #'
-#' Calls `POST /execute/batch`. The rows are not checked here: the
-#' server reports a bad row in that row's result, and a failed row does
-#' not stop the call. A bad `job` block is the exception: it stops the
-#' call before anything is sent. With a `signing_key`, each row carries
+#' Calls `POST /execute/batch`. The rows' values are not checked here:
+#' the server reports a bad row in that row's result, and a failed row
+#' does not stop the call. The exceptions stop the call before anything is
+#' sent: a field name the server does not know, in a row or in its
+#' `attested_context`, and a bad `job` block, `policy_context` or
+#' `expected_policy_hash`. With a `signing_key`, each row carries
 #' its own signature and nonce, and its result holds `signed_request`.
 #'
 #' This is one POST and it is never retried. After a timeout the server

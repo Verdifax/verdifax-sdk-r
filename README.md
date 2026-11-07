@@ -121,15 +121,21 @@ GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 42
 | `verdifax_register_request_key()` | `POST /keys/request-key` |
 | `verdifax_rotate_request_key()` | `POST /keys/request-key` |
 | `verdifax_clear_request_key()` | `DELETE /keys/request-key` |
+| `verdifax_upload_policy()` | `POST /policies` |
+| `verdifax_list_policies()` | `GET /policies` |
+| `verdifax_get_policy()` | `GET /policies/{document_hash}` |
+| `verdifax_test_policy()` | `POST /policies/test` |
+| `verdifax_get_policy_history()` | `GET /policies/history` |
+| `verdifax_activate_policy()` | `GET /policies`, then `POST /policies/{document_hash}/activate` |
 | `verdifax_admin_create_key()` | `POST /admin/keys` |
 | `verdifax_admin_list_keys()` | `GET /admin/keys` |
 | `verdifax_admin_revoke_key()` | `DELETE /admin/keys/{id}` |
 | `verdifax_admin_clear_request_key()` | `DELETE /admin/keys/{id}/request-key` |
 | `verdifax_admin_erase()` | `POST /admin/erase` |
 
-These make no request: `verdifax_client()`, `verdifax_from_env()`, `verdifax_job()`, `verdifax_capture_environment()`, `verdifax_format_provider_payload()`, `verdifax_sign_request()`, `verdifax_request_key_registration_body()`, `verdifax_request_signature_preimage()`, `verdifax_generate_request_key()`, `verdifax_validate_hex64()`, `verdifax_validate_route_id()`, `verdifax_dse_dispatch_hash()`, `verdifax_dcae_closure_hash()`, `verdifax_cres_receipt_hash()` and `verdifax_run_statuses()`.
+These make no request: `verdifax_client()`, `verdifax_from_env()`, `verdifax_job()`, `verdifax_capture_environment()`, `verdifax_format_provider_payload()`, `verdifax_sign_request()`, `verdifax_request_key_registration_body()`, `verdifax_request_signature_preimage()`, `verdifax_policy_activation_preimage()`, `verdifax_policy_activation_approval()`, `verdifax_generate_request_key()`, `verdifax_validate_hex64()`, `verdifax_validate_route_id()`, `verdifax_dse_dispatch_hash()`, `verdifax_dcae_closure_hash()`, `verdifax_cres_receipt_hash()` and `verdifax_run_statuses()`.
 
-`verdifax_get_run_artifacts()`, `verdifax_get_public_bundle()` and `verdifax_get_public_bundle_by_token()` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
+`verdifax_get_run_artifacts()`, `verdifax_get_public_bundle()`, `verdifax_get_public_bundle_by_token()` and `verdifax_get_policy_history()` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
 
 ## Runs
 
@@ -145,7 +151,7 @@ check <- verdifax_verify_run(client, result$run_id)
 
 ## Batch runs
 
-`verdifax_execute_batch()` sends up to 1,000 runs in one request and stops with an error for more, before sending anything. Each row is a list with the argument names of `verdifax_attest()`. A row that fails comes back in `results` with `ok` set to `FALSE`, so the call does not stop for it.
+`verdifax_execute_batch()` sends up to 1,000 runs in one request and stops with an error for more, before sending anything. Each row is a list with the argument names of `verdifax_attest()`. A row that fails comes back in `results` with `ok` set to `FALSE`, so the call does not stop for it. A name the server does not know, in a row or in its `attested_context`, stops the call before anything is sent, because the server would drop it with no error.
 
 ```r
 batch <- verdifax_execute_batch(client, list(
@@ -195,6 +201,75 @@ A refused or halted step stays in the map. `verdifax_job_step()` records its has
 
 A job map covers what was sent. It cannot show a step that was never sent.
 
+## Policies
+
+A policy is a document you write: rules that decide whether a run on your API key goes ahead. Upload its exact text, try it on sample inputs, then activate it. Until you activate one, the built-in policy applies.
+
+```r
+path <- "loan-policy.json"
+document <- readChar(path, file.size(path), useBytes = TRUE)
+
+stored <- verdifax_upload_policy(client, document)
+stored$document_hash # SHA-256 of the exact text
+
+# Which rule would fire on sample inputs. This seals nothing.
+trial <- verdifax_test_policy(
+  client,
+  inputs = list(
+    subject_id = "u-17", subject_type = "user", verb = "approve",
+    object_type = "transaction", classification = "CONFIDENTIAL"
+  ),
+  document_hash = stored$document_hash
+)
+trial$outcome
+trial$fired_rule_id
+
+# Make it the policy in force. With a signing_key, the client's request key
+# signs the change.
+change <- verdifax_activate_policy(client, stored$document_hash)
+
+# A run that declares what the rules read. The server refuses it if another
+# policy is active.
+result <- verdifax_attest(
+  client = client,
+  payload = "loan 42 approved",
+  program_id = strrep("0", 64),
+  route_id = "loan-decision",
+  registry_record_hash = strrep("0", 64),
+  attested_context = list(actor_id = "u-17", actor_role = "loan_officer"),
+  policy_context = list(
+    actor_type = "user",
+    mfa_satisfied = TRUE,
+    session_age_seconds = 120,
+    object_type = "transaction",
+    object_id = "loan-42",
+    classification = "CONFIDENTIAL"
+  ),
+  expected_policy_hash = stored$policy_hash
+)
+
+# Roll back by activating an earlier document. It is one more change in the
+# chain, so the change it undoes stays on the record.
+earlier <- verdifax_list_policies(client)$policies[[2]] # newest first
+verdifax_activate_policy(client, earlier$document_hash)
+
+# Save the chain of changes and check it offline.
+writeLines(verdifax_get_policy_history(client), "policy-history.json", sep = "")
+# verdifax-verify --policy-history policy-history.json
+```
+
+Verdifax did not write, review or approve your policy. A pass means the rules ran, not that they are good rules.
+
+The document is sent as the exact string you give, because the server hashes its exact bytes. A list or any other object is refused before sending, since serializing it would change the hash. Read a file whole, as above: `readLines()` drops the final newline. `verdifax_get_policy()` returns the stored text, and `verdifax_list_policies()` lists your documents with `chain_id`, `newest_activation_hash` and `active_document_hash`.
+
+`verdifax_activate_policy()` reads `GET /policies` for the chain and its newest change, then asks for the change naming that newest change. Once a request key is registered, the server needs that key to approve a change, so call it with a client that holds the key. An HTTP 409 means the change could not be made as asked, for example because someone changed the policy first or the document is not yet effective: the call stops with the server's message and is not retried. `verdifax_policy_activation_approval()` and `verdifax_policy_activation_preimage()` build the approval and its bytes without sending anything.
+
+`policy_context` is what a run declares for the rules to read: `actor_type`, `mfa_satisfied`, `session_age_seconds`, `object_type`, `object_id` and `classification`, all optional. `verdifax_attest()`, `verdifax_execute()`, `verdifax_verify_determinism()`, `verdifax_job_step()`, the provider helpers and each batch row accept it. An unknown field or a value outside the listed ones is refused before sending, so a misspelt field is never dropped. `actor_type`, `mfa_satisfied` and `session_age_seconds` describe the attested actor, so a set `actor_type`, `mfa_satisfied = TRUE` or a non-zero `session_age_seconds` needs an `attested_context` with at least one field set, such as `actor_id`, and is refused before sending otherwise. `mfa_satisfied = FALSE` and `session_age_seconds = 0` need none. The provider helpers send an `attested_context` with `actor_role` and `model_provider`, so they can carry any `policy_context` field. `expected_policy_hash` makes the server refuse the run with HTTP 409 when another policy is active. Both go inside `signed_request` on a signed client.
+
+A policy judges what you declared. It cannot show the declared facts are true.
+
+A refusal stops the action only if your system waits for the answer.
+
 ## Evidence export
 
 `verdifax_export_runs()` lists the runs the server holds for your key in a period, failures included, with up to 10,000 rows per export. `verdifax_export_runs_csv()` returns the same rows as raw CSV text.
@@ -225,7 +300,7 @@ Both take an optional `job` block and return what `verdifax_attest()` returns, i
 
 ## Optional execute fields
 
-`verdifax_attest()`, `verdifax_execute()`, `verdifax_execute_batch()` and `verdifax_verify_determinism()` accept `attested_context`, `reproducibility_context`, `request_substance`, `authorization_chain`, `regulatory_scaffolding` and `causal_graph`. Each is recorded as supplied and Verdifax does not check it. Write a JSON array as an unnamed list, so that one item stays an array. The client derives `attested` and `declared` from the fields you provide. Leave out `request_substance$origin$source_ip_hash` and `user_agent_hash`: the server computes them. `verdifax_attest()`, `verdifax_execute()` and `verdifax_verify_determinism()` refuse them before sending, and a batch row that sets them fails in `results`.
+`verdifax_attest()`, `verdifax_execute()`, `verdifax_execute_batch()` and `verdifax_verify_determinism()` accept `attested_context`, `reproducibility_context`, `request_substance`, `authorization_chain`, `regulatory_scaffolding` and `causal_graph`. Each is recorded as supplied and Verdifax does not check it, but an `attested_context` field name outside `actor_id`, `actor_role`, `authorization_policy`, `actor_signature`, `model_provider`, `model_name`, `model_version`, `model_temperature`, `prompt_hash`, `decision_kind`, `decision_result` and `decision_note` is refused before sending, so a misspelt field is never dropped. They also accept `policy_context` and `expected_policy_hash`, which are checked before sending: see [Policies](#policies). Write a JSON array as an unnamed list, so that one item stays an array. The client derives `attested` and `declared` from the fields you provide. Leave out `request_substance$origin$source_ip_hash` and `user_agent_hash`: the server computes them. `verdifax_attest()`, `verdifax_execute()` and `verdifax_verify_determinism()` refuse them before sending, and a batch row that sets them fails in `results`.
 
 These functions check that `program_id` and `registry_record_hash` are 64 lowercase hex characters and that `route_id` is 1 to 256 printable ASCII characters.
 
@@ -273,8 +348,8 @@ keys <- verdifax_generate_request_key()
 client <- verdifax_client(signing_key = keys$private_key)
 verdifax_register_request_key(client) # sends the public key with its proof
 
-# verdifax_attest(), verdifax_execute_batch() and
-# verdifax_verify_determinism() now sign.
+# verdifax_attest(), verdifax_execute_batch(),
+# verdifax_verify_determinism() and verdifax_activate_policy() now sign.
 result <- verdifax_attest(
   client = client,
   payload = "my-analysis-output",

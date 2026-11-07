@@ -372,10 +372,10 @@ test_that("GET, HEAD and OPTIONS carry the retry policy and POST does not", {
   expect_null(verdifax:::.build_request(off, "/x", NULL, method = "GET")$policies$retry_max_tries)
 })
 
-test_that("the default user agent names version 1.1.0", {
+test_that("the default user agent names version 1.2.0", {
   client <- verdifax_client(base_url = "http://mock.invalid")
   req <- verdifax:::.build_request(client, "/x", NULL, method = "GET")
-  expect_equal(httr2::req_get_headers(req)[["User-Agent"]], "verdifax-r/1.1.0")
+  expect_equal(httr2::req_get_headers(req)[["User-Agent"]], "verdifax-r/1.2.0")
 })
 
 test_that("user_agent reaches the request", {
@@ -464,6 +464,28 @@ test_that("section0 hashes match the vectors the Go and Python code share", {
   expected <- "1bb128c1f86cc6c7d63d44cc49bbdfc1185c8105d5bc270838af63814901bee5"
   expect_equal(do.call(verdifax_cres_receipt_hash, receipt), expected)
   expect_false(identical(do.call(verdifax_cres_receipt_hash, c(receipt, "other")), expected))
+})
+
+test_that("the hashes need only openssl, not sodium", {
+  helper <- paste(deparse(verdifax:::.sha256_hex), collapse = "\n")
+  expect_false(grepl("sodium", helper, fixed = TRUE))
+  expect_true(grepl("openssl::sha256", helper, fixed = TRUE))
+  testthat::local_mocked_bindings(.sodium_available = function() FALSE, .package = "verdifax")
+  expect_equal(
+    verdifax_dse_dispatch_hash(
+      "env-fixture-v1-aaaaaaaaaaaaaaaa", "seq-fixture-v1-1",
+      strrep("1", 64), strrep("2", 64)
+    ),
+    "e66378381a9dea8ee0475ddc5b55a81f256aac523dd523c02c08e25ab34bae6b"
+  )
+  expect_equal(
+    verdifax:::.sha256_hex("hello"),
+    "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+  )
+  expect_equal(
+    verdifax:::.sha256_hex("caf\u00e9"),
+    paste(as.character(openssl::sha256(charToRaw(enc2utf8("caf\u00e9")))), collapse = "")
+  )
 })
 
 test_that("section0 refuses a value that is not 64 lowercase hex", {
