@@ -157,9 +157,62 @@
   inputs
 }
 
-.policy_path <- function(document_hash, suffix = "") {
+# A key's own policies are under /policies and its account's under
+# /account/policies. The routes take the same bodies and give the same
+# responses, so one implementation serves both.
+.POLICIES_PATH <- "/policies"
+.ACCOUNT_POLICIES_PATH <- "/account/policies"
+
+.policy_path <- function(document_hash, suffix = "", base = .POLICIES_PATH) {
   verdifax_validate_hex64(document_hash, "document_hash")
-  paste0("/policies/", document_hash, suffix)
+  paste0(base, "/", document_hash, suffix)
+}
+
+.upload_policy_at <- function(client, base, document) {
+  .send(client, "POST", base, list(document = .policy_document(document)))
+}
+
+.test_policy_at <- function(client, base, caller, inputs, document, document_hash) {
+  if (is.null(document) == is.null(document_hash)) {
+    stop(caller, " needs exactly one of document and document_hash", call. = FALSE)
+  }
+  body <- list(inputs = .policy_inputs(inputs))
+  if (!is.null(document)) {
+    body$document <- .policy_document(document)
+  } else {
+    verdifax_validate_hex64(document_hash, "document_hash")
+    body$document_hash <- as.vector(document_hash)
+  }
+  .send(client, "POST", paste0(base, "/test"), body)
+}
+
+# Reads the chain and its newest change with `list_policies`, then asks for
+# the change naming that newest change, signed when the client has a request
+# key. With `signature_required`, a client without one is refused before any
+# request, because the server refuses an unsigned change on that chain.
+.activate_policy_at <- function(client, base, document_hash, list_policies,
+                                signature_required = NULL) {
+  path <- .policy_path(document_hash, "/activate", base)
+  if (!is.null(signature_required) && is.null(.active_signer(client))) {
+    stop(signature_required, call. = FALSE)
+  }
+  state <- list_policies(client)
+  previous <- state[["newest_activation_hash"]]
+  if (!is.character(previous) || length(previous) != 1 ||
+      !grepl("^[0-9a-f]{64}$", previous)) {
+    stop("the server did not return newest_activation_hash, so no change was asked for",
+      call. = FALSE)
+  }
+  body <- list(previous_activation_hash = previous)
+  signer <- .active_signer(client)
+  if (!is.null(signer)) {
+    chain_id <- state[["chain_id"]]
+    if (!is.character(chain_id) || length(chain_id) != 1 || !nzchar(chain_id)) {
+      stop("the server did not return chain_id, so the change cannot be signed", call. = FALSE)
+    }
+    body$signature <- .policy_activation(signer, chain_id, document_hash, previous)
+  }
+  .send(client, "POST", path, body)[["activation"]]
 }
 
 
@@ -187,7 +240,7 @@
 #'
 #' @export
 verdifax_upload_policy <- function(client, document) {
-  .send(client, "POST", "/policies", list(document = .policy_document(document)))
+  .upload_policy_at(client, .POLICIES_PATH, document)
 }
 
 #' List this key's policy documents.
@@ -203,7 +256,7 @@ verdifax_upload_policy <- function(client, document) {
 #'
 #' @export
 verdifax_list_policies <- function(client) {
-  .perform(.get(client, "/policies"))
+  .perform(.get(client, .POLICIES_PATH))
 }
 
 #' Read one of this key's policy documents.
@@ -242,17 +295,7 @@ verdifax_get_policy <- function(client, document_hash) {
 #'
 #' @export
 verdifax_test_policy <- function(client, inputs, document = NULL, document_hash = NULL) {
-  if (is.null(document) == is.null(document_hash)) {
-    stop("verdifax_test_policy needs exactly one of document and document_hash", call. = FALSE)
-  }
-  body <- list(inputs = .policy_inputs(inputs))
-  if (!is.null(document)) {
-    body$document <- .policy_document(document)
-  } else {
-    verdifax_validate_hex64(document_hash, "document_hash")
-    body$document_hash <- as.vector(document_hash)
-  }
-  .send(client, "POST", "/policies/test", body)
+  .test_policy_at(client, .POLICIES_PATH, "verdifax_test_policy", inputs, document, document_hash)
 }
 
 #' The chain of this key's policy changes, oldest first.
@@ -268,7 +311,7 @@ verdifax_test_policy <- function(client, inputs, document = NULL, document_hash 
 #'
 #' @export
 verdifax_get_policy_history <- function(client) {
-  .get_body_text(client, "/policies/history")
+  .get_body_text(client, paste0(.POLICIES_PATH, "/history"))
 }
 
 #' Make a stored policy document the policy in force.
@@ -290,22 +333,5 @@ verdifax_get_policy_history <- function(client) {
 #'
 #' @export
 verdifax_activate_policy <- function(client, document_hash) {
-  path <- .policy_path(document_hash, "/activate")
-  state <- verdifax_list_policies(client)
-  previous <- state[["newest_activation_hash"]]
-  if (!is.character(previous) || length(previous) != 1 ||
-      !grepl("^[0-9a-f]{64}$", previous)) {
-    stop("the server did not return newest_activation_hash, so no change was asked for",
-      call. = FALSE)
-  }
-  body <- list(previous_activation_hash = previous)
-  signer <- .active_signer(client)
-  if (!is.null(signer)) {
-    chain_id <- state[["chain_id"]]
-    if (!is.character(chain_id) || length(chain_id) != 1 || !nzchar(chain_id)) {
-      stop("the server did not return chain_id, so the change cannot be signed", call. = FALSE)
-    }
-    body$signature <- .policy_activation(signer, chain_id, document_hash, previous)
-  }
-  .send(client, "POST", path, body)[["activation"]]
+  .activate_policy_at(client, .POLICIES_PATH, document_hash, verdifax_list_policies)
 }

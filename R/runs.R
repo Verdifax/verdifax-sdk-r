@@ -32,6 +32,44 @@
   httr2::req_error(req, body = .error_detail)
 }
 
+# A key's own runs are exported from /runs/export and its account's, by the
+# owner key, from /account/runs/export, with the same query and formats.
+.RUNS_EXPORT_PATH <- "/runs/export"
+.ACCOUNT_RUNS_EXPORT_PATH <- "/account/runs/export"
+
+.export_query <- function(from, to, job_id, format) {
+  if (!is.null(job_id)) {
+    .check_job_name(job_id, "job_id")
+  }
+  .query(from = from, to = to, job_id = job_id, format = format)
+}
+
+.export_runs_json <- function(client, path, from, to, job_id) {
+  .perform(.get(client, path, .export_query(from, to, job_id, "json")))
+}
+
+# `total` and `truncated` come from the response headers. Without them the
+# call stops, so that a cut-off export cannot pass for a complete one.
+.export_runs_csv <- function(client, path, from, to, job_id, json_export) {
+  resp <- httr2::req_perform(.get(client, path, .export_query(from, to, job_id, "csv")))
+  total <- httr2::resp_header(resp, .HEADER_EXPORT_TOTAL)
+  truncated <- httr2::resp_header(resp, .HEADER_EXPORT_TRUNCATED)
+  if (is.null(total) || !grepl("^[0-9]+$", total) ||
+      is.null(truncated) || !truncated %in% c("true", "false")) {
+    stop(
+      "the server did not report ", .HEADER_EXPORT_TOTAL, " and ",
+      .HEADER_EXPORT_TRUNCATED,
+      ", so this CSV may be cut off; use ", json_export, "() instead",
+      call. = FALSE
+    )
+  }
+  list(
+    csv = httr2::resp_body_string(resp),
+    total = as.numeric(total),
+    truncated = identical(truncated, "true")
+  )
+}
+
 
 # ── Runs ────────────────────────────────────────────────────────────────────
 
@@ -74,7 +112,8 @@ verdifax_get_run <- function(client, run_id) {
 #' @param offset Optional number of rows to skip.
 #'
 #' @return Parsed API response list with `total`, `limit`, `offset`
-#'   and `runs`.
+#'   and `runs`. Each run holds `api_key_id`, the id of the key that
+#'   requested it.
 #'
 #' @export
 verdifax_list_runs <- function(client, limit = NULL, offset = NULL) {
@@ -136,15 +175,13 @@ verdifax_search_runs <- function(client,
 #'
 #' @return Parsed API response list with `to`, `total`, `returned`,
 #'   `truncated`, `by_status` and `runs`. New rows hold `anchor_source`,
-#'   `job_id` and `step_id`.
+#'   `job_id` and `step_id`, and every row holds `api_key_id`, the id of
+#'   the key that requested the run. In the CSV, `api_key_id` is the last
+#'   column, after `step_id`.
 #'
 #' @export
 verdifax_export_runs <- function(client, from = NULL, to = NULL, job_id = NULL) {
-  if (!is.null(job_id)) {
-    .check_job_name(job_id, "job_id")
-  }
-  query <- .query(from = from, to = to, job_id = job_id, format = "json")
-  .perform(.get(client, "/runs/export", query))
+  .export_runs_json(client, .RUNS_EXPORT_PATH, from, to, job_id)
 }
 
 #' Export the same rows as `verdifax_export_runs()` as CSV.
@@ -161,27 +198,7 @@ verdifax_export_runs <- function(client, from = NULL, to = NULL, job_id = NULL) 
 #'
 #' @export
 verdifax_export_runs_csv <- function(client, from = NULL, to = NULL, job_id = NULL) {
-  if (!is.null(job_id)) {
-    .check_job_name(job_id, "job_id")
-  }
-  query <- .query(from = from, to = to, job_id = job_id, format = "csv")
-  resp <- httr2::req_perform(.get(client, "/runs/export", query))
-  total <- httr2::resp_header(resp, .HEADER_EXPORT_TOTAL)
-  truncated <- httr2::resp_header(resp, .HEADER_EXPORT_TRUNCATED)
-  if (is.null(total) || !grepl("^[0-9]+$", total) ||
-      is.null(truncated) || !truncated %in% c("true", "false")) {
-    stop(
-      "the server did not report ", .HEADER_EXPORT_TOTAL, " and ",
-      .HEADER_EXPORT_TRUNCATED,
-      ", so this CSV may be cut off; use verdifax_export_runs() instead",
-      call. = FALSE
-    )
-  }
-  list(
-    csv = httr2::resp_body_string(resp),
-    total = as.numeric(total),
-    truncated = identical(truncated, "true")
-  )
+  .export_runs_csv(client, .RUNS_EXPORT_PATH, from, to, job_id, "verdifax_export_runs")
 }
 
 

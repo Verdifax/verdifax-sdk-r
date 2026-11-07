@@ -6,9 +6,10 @@
 # determinism check and request signing. R/runs.R holds run retrieval,
 # evidence export and batch runs. R/jobs.R holds job blocks and the job
 # helper. R/policies.R holds the policy routes and the policy_context
-# checks. R/routes.R holds every other route and the provider and admin
-# helpers. R/section0.R holds the canonical hash formulas. README.md lists
-# every exported function.
+# checks. R/accounts.R holds the account routes, used with an account's
+# owner key, and the admin account routes. R/routes.R holds every other
+# route and the provider and admin helpers. R/section0.R holds the
+# canonical hash formulas. README.md lists every exported function.
 #
 # All failures from auto-detection are silently swallowed and the
 # corresponding field is left NULL. The orchestrator records NULL as
@@ -74,7 +75,8 @@
 #'   set, `verdifax_attest()`, `verdifax_execute()`,
 #'   `verdifax_execute_batch()`, `verdifax_verify_determinism()` and the
 #'   provider helpers sign their requests, and `verdifax_activate_policy()`
-#'   signs the change it asks for. Needs the `sodium` package.
+#'   and `verdifax_activate_account_policy()` sign the change they ask
+#'   for. Needs the `sodium` package.
 #'   The key is never sent to the server, and the returned list holds it
 #'   only inside a closure, so printing the client does not show it.
 #' @param user_agent Optional `User-Agent` value.
@@ -492,7 +494,11 @@ verdifax_attest <- function(client,
 #' The top-level `deterministic` flag is grounded on manifest hash
 #' equality, the canonical seal of the pipeline output. Bundle hash
 #' differences are surfaced in `diff$differing_fields` as
-#' informational metadata (server-observed timing variation).
+#' informational metadata (server-observed timing variation). A request
+#' the policy refuses, or a later check halts, is compared the same way:
+#' each refused run's row carries its sealed `receipt`, and two identical
+#' refusals are deterministic. When neither run sealed a record,
+#' `diff$reason` says why there is no verdict.
 #'
 #' With a `signing_key`, one signature covers the request, and the
 #' server claims its nonce once.

@@ -127,15 +127,32 @@ GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 42
 | `verdifax_test_policy()` | `POST /policies/test` |
 | `verdifax_get_policy_history()` | `GET /policies/history` |
 | `verdifax_activate_policy()` | `GET /policies`, then `POST /policies/{document_hash}/activate` |
+| `verdifax_get_account()` | `GET /account` |
+| `verdifax_create_account_key()` | `POST /account/keys` |
+| `verdifax_list_account_keys()` | `GET /account/keys` |
+| `verdifax_revoke_account_key()` | `DELETE /account/keys/{id}` |
+| `verdifax_register_account_request_key()` | `POST /account/request-key` |
+| `verdifax_clear_account_request_key()` | `DELETE /account/request-key` |
+| `verdifax_list_account_runs()` | `GET /account/runs` |
+| `verdifax_export_account_runs()` | `GET /account/runs/export` |
+| `verdifax_export_account_runs_csv()` | `GET /account/runs/export?format=csv` |
+| `verdifax_upload_account_policy()` | `POST /account/policies` |
+| `verdifax_list_account_policies()` | `GET /account/policies` |
+| `verdifax_get_account_policy()` | `GET /account/policies/{document_hash}` |
+| `verdifax_test_account_policy()` | `POST /account/policies/test` |
+| `verdifax_get_account_policy_history()` | `GET /account/policies/history` |
+| `verdifax_activate_account_policy()` | `GET /account/policies`, then `POST /account/policies/{document_hash}/activate` |
 | `verdifax_admin_create_key()` | `POST /admin/keys` |
 | `verdifax_admin_list_keys()` | `GET /admin/keys` |
 | `verdifax_admin_revoke_key()` | `DELETE /admin/keys/{id}` |
 | `verdifax_admin_clear_request_key()` | `DELETE /admin/keys/{id}/request-key` |
 | `verdifax_admin_erase()` | `POST /admin/erase` |
+| `verdifax_admin_create_account()` | `POST /admin/accounts` |
+| `verdifax_admin_list_accounts()` | `GET /admin/accounts` |
 
 These make no request: `verdifax_client()`, `verdifax_from_env()`, `verdifax_job()`, `verdifax_capture_environment()`, `verdifax_format_provider_payload()`, `verdifax_sign_request()`, `verdifax_request_key_registration_body()`, `verdifax_request_signature_preimage()`, `verdifax_policy_activation_preimage()`, `verdifax_policy_activation_approval()`, `verdifax_generate_request_key()`, `verdifax_validate_hex64()`, `verdifax_validate_route_id()`, `verdifax_dse_dispatch_hash()`, `verdifax_dcae_closure_hash()`, `verdifax_cres_receipt_hash()` and `verdifax_run_statuses()`.
 
-`verdifax_get_run_artifacts()`, `verdifax_get_public_bundle()`, `verdifax_get_public_bundle_by_token()` and `verdifax_get_policy_history()` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
+`verdifax_get_run_artifacts()`, `verdifax_get_public_bundle()`, `verdifax_get_public_bundle_by_token()`, `verdifax_get_policy_history()` and `verdifax_get_account_policy_history()` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
 
 ## Runs
 
@@ -290,7 +307,64 @@ if (export$truncated) {
 export$csv
 ```
 
-The export states what the server stored, not a verdict. A call that never reached Verdifax cannot appear in it. Both forms say when a period holds more rows than the export returned: check `truncated`. `verdifax_export_runs_csv()` reads `total` and `truncated` from the `X-Verdifax-Total` and `X-Verdifax-Truncated` response headers, and stops with an error if the server does not send them. In the CSV, a `route_id` that a spreadsheet could read as a formula gets a leading `'`.
+The export states what the server stored, not a verdict. A call that never reached Verdifax cannot appear in it. Both forms say when a period holds more rows than the export returned: check `truncated`. `verdifax_export_runs_csv()` reads `total` and `truncated` from the `X-Verdifax-Total` and `X-Verdifax-Truncated` response headers, and stops with an error if the server does not send them. In the CSV, a `route_id` that a spreadsheet could read as a formula gets a leading `'`. Each row, in both forms, holds `api_key_id`, the id of the key that requested the run; in the CSV it is the last column, after `step_id`. Each run that `verdifax_list_runs()` and `verdifax_list_account_runs()` return holds it too.
+
+## Accounts
+
+An account is a company on Verdifax. Every API key belongs to one account for life. An account has an owner key, which manages the account, and member keys, which run. An admin creates the account and its first owner key, and the owner creates the member keys.
+
+```r
+# An admin creates the account and its owner key. VERDIFAX_API_KEY holds an
+# admin key here.
+admin <- verdifax_client()
+created <- verdifax_admin_create_account(admin, "Acme Lending", tier = "trial")
+created$account$account_id # for example "account-7"
+created$owner_key$secret   # shown once: store it as a secret
+
+# The owner key's request key signs every change to the account's policy.
+request_key <- verdifax_generate_request_key()
+owner <- verdifax_client(
+  api_key = created$owner_key$secret,
+  signing_key = request_key$private_key
+)
+verdifax_register_account_request_key(owner)
+
+# The owner creates the member keys that run.
+member <- verdifax_create_account_key(owner, "loan-decisions")
+member$secret # shown once: store it as a secret
+verdifax_list_account_keys(owner)$keys
+
+# The owner loads the account's policy, tries it, then activates it.
+path <- "company-policy.json"
+stored <- verdifax_upload_account_policy(owner, readChar(path, file.size(path), useBytes = TRUE))
+verdifax_test_account_policy(
+  owner,
+  inputs = list(subject_id = "u-17", verb = "approve"),
+  document_hash = stored$document_hash
+)
+verdifax_activate_account_policy(owner, stored$document_hash)
+
+# The owner exports the runs of every key in the account.
+evidence <- verdifax_export_account_runs(
+  owner, from = "2026-11-01T00:00:00Z", to = "2026-12-01T00:00:00Z"
+)
+evidence$account_id
+evidence$truncated
+```
+
+The account number is a label Verdifax assigned, not a verified company identity.
+
+An account policy is your own: Verdifax did not write, review or approve it. Every key in the account must pass the account policy on top of its own policy, and a run is admitted only when both allow.
+
+The account's view covers the runs its keys made through Verdifax, not runs made elsewhere.
+
+An owner key cannot run anything. The server refuses it with HTTP 403 on the routes that run or read runs, so use member keys for runs and the owner key with the account functions above.
+
+Every change to the account's policy must be signed by the owner key's request key, over the account's chain, for example `account-7`. `verdifax_activate_account_policy()` reads that chain and its newest change from `verdifax_list_account_policies()` and signs as `verdifax_activate_policy()` does. A client without a `signing_key` is refused before anything is sent, because the server refuses an unsigned change. Rolling back is activating an earlier document, and `verdifax_get_account_policy_history()` returns the chain of changes for `verdifax-verify --policy-history`.
+
+`verdifax_export_account_runs()` and `verdifax_export_account_runs_csv()` take the same period and `job_id` as `verdifax_export_runs()`. The JSON export also holds `account_id` and, once the account has policy documents, `account_policy_documents` and `account_policy_history`. `verdifax_list_account_runs()` pages through the same runs with `limit` and `offset`. Every row and run holds `api_key_id`, so you can tell which of the account's keys requested it.
+
+`verdifax_revoke_account_key()` revokes a member key. A key in another account, or an owner key, answers HTTP 404. A member key on a trial account needs its own request key before it seals anything, as every trial key does: see Request signing. An admin can also put a new key in an existing account with `verdifax_admin_create_key(admin, name, account_id = created$account$id)`. `verdifax_admin_list_accounts()` lists every account with its key counts.
 
 ## Provider helpers
 
@@ -349,7 +423,8 @@ client <- verdifax_client(signing_key = keys$private_key)
 verdifax_register_request_key(client) # sends the public key with its proof
 
 # verdifax_attest(), verdifax_execute_batch(),
-# verdifax_verify_determinism() and verdifax_activate_policy() now sign.
+# verdifax_verify_determinism(), verdifax_activate_policy() and
+# verdifax_activate_account_policy() now sign.
 result <- verdifax_attest(
   client = client,
   payload = "my-analysis-output",

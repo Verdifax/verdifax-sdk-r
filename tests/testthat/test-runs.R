@@ -100,6 +100,38 @@ test_that("verdifax_list_runs sends limit and offset", {
   expect_equal(page$runs[[1]]$id, 7)
 })
 
+test_that("each run, and each export row in JSON and CSV, keeps api_key_id as the server sent it", {
+  csv <- "run_id,status,job_id,step_id,api_key_id\n1,ok,loan-1,decide,12\n"
+  respond <- function(req) {
+    path <- httr2::url_parse(httr2::req_get_url(req))$path
+    format <- httr2::url_parse(httr2::req_get_url(req))$query$format
+    if (path == "/runs") {
+      return(json_response("{\"ok\":true,\"total\":1,\"runs\":[{\"id\":7,\"api_key_id\":12}]}"))
+    }
+    if (identical(format, "csv")) {
+      headers <- list("Content-Type" = "text/csv; charset=utf-8")
+      headers[["X-Verdifax-Total"]] <- "1"
+      headers[["X-Verdifax-Truncated"]] <- "false"
+      return(httr2::response(status_code = 200, headers = headers, body = charToRaw(csv)))
+    }
+    json_response(paste0(
+      "{\"ok\":true,\"total\":1,\"returned\":1,\"truncated\":false,\"by_status\":{\"ok\":1},",
+      "\"runs\":[{\"run_id\":7,\"step_id\":\"decide\",\"api_key_id\":12}]}"
+    ))
+  }
+  capture({
+    page <- verdifax_list_runs(test_client())
+    evidence <- verdifax_export_runs(test_client())
+    export <- verdifax_export_runs_csv(test_client())
+  }, respond)
+  expect_identical(page$runs[[1]]$api_key_id, 12L)
+  expect_identical(evidence$runs[[1]]$api_key_id, 12L)
+  expect_identical(export$csv, csv)
+  rows <- utils::read.csv(text = export$csv, colClasses = "character")
+  expect_identical(utils::tail(names(rows), 2), c("step_id", "api_key_id"))
+  expect_identical(rows$api_key_id, "12")
+})
+
 test_that("verdifax_list_runs with no arguments sends no query", {
   sent <- capture(verdifax_list_runs(test_client()))
   expect_equal(sent[[1]]$url$path, "/runs")

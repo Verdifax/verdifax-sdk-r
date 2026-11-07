@@ -183,6 +183,35 @@ test_that("vector: the policy activation approval, byte for byte", {
   expect_equal(internal, approval)
 })
 
+test_that("vector: the account policy activation preimage, byte for byte", {
+  expect_equal(.vector$account_activation_chain_id, "account-7")
+  preimage <- verdifax_policy_activation_preimage(
+    .vector$account_activation_chain_id, .vector$activation_document_hash,
+    .vector$activation_previous_hash, .vector$signed_at, .vector$nonce
+  )
+  expect_type(preimage, "raw")
+  expect_equal(paste(as.character(preimage), collapse = ""), .vector$account_activation_preimage_hex)
+  expect_false(identical(.vector$account_activation_preimage_hex, .vector$activation_preimage_hex))
+})
+
+test_that("vector: the account policy activation approval, byte for byte", {
+  need_sodium()
+  approval <- verdifax_policy_activation_approval(
+    vector_seed(), .vector$account_activation_chain_id, .vector$activation_document_hash,
+    .vector$activation_previous_hash, .vector$signed_at, .vector$nonce
+  )
+  expect_equal(approval, list(
+    signature = .vector$account_activation_signature,
+    signed_at = .vector$signed_at,
+    nonce = .vector$nonce
+  ))
+  internal <- verdifax:::.policy_activation(
+    vector_signer(), .vector$account_activation_chain_id, .vector$activation_document_hash,
+    .vector$activation_previous_hash, .vector$signed_at, .vector$nonce
+  )
+  expect_equal(internal, approval)
+})
+
 test_that("a policy activation approval defaults to now and a fresh nonce", {
   need_sodium()
   first <- verdifax_policy_activation_approval(

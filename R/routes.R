@@ -12,7 +12,7 @@
 }
 
 .require_id <- function(value, name) {
-  if (!is.numeric(value) || length(value) != 1 || is.na(value) ||
+  if (!is.numeric(value) || length(value) != 1 || is.na(value) || !is.finite(value) ||
       value <= 0 || value != floor(value)) {
     stop(name, " must be a positive whole number", call. = FALSE)
   }
@@ -365,17 +365,31 @@ verdifax_list_deletion_receipts <- function(client, run_id) {
 
 #' Create an API key.
 #'
+#' Every key belongs to one account for life. Without `account_id` the key
+#' gets an account of its own; with it, the key is a member key of that
+#' existing account.
+#'
 #' @inheritParams verdifax_health
 #' @param name The key's name.
+#' @param account_id Optional number of an existing account, the `id` that
+#'   `verdifax_admin_create_account()` and `verdifax_admin_list_accounts()`
+#'   return, for example `7` for `"account-7"`. A positive whole number;
+#'   anything else is refused before sending.
 #'
-#' @return Parsed API response list. It holds the secret once.
+#' @return Parsed API response list, with `account_id` as a label such as
+#'   `"account-7"`. It holds the secret once.
 #'
 #' @export
-verdifax_admin_create_key <- function(client, name) {
+verdifax_admin_create_key <- function(client, name, account_id = NULL) {
   if (!is.character(name) || length(name) != 1 || is.na(name) || !nzchar(name)) {
     stop("name is required", call. = FALSE)
   }
-  .send(client, "POST", "/admin/keys", list(name = name))
+  body <- list(name = name)
+  if (!is.null(account_id)) {
+    .require_id(account_id, "account_id")
+    body$account_id <- as.vector(account_id)
+  }
+  .send(client, "POST", "/admin/keys", body)
 }
 
 #' List the API keys in the deployment, without their secrets.
