@@ -21,6 +21,8 @@ remotes::install_github("Verdifax/verdifax-sdk-r")
 
 ## Usage
 
+On a trial key, register a request key first and give the client that key: see [Request signing](#request-signing). Without it, a trial key refuses the run.
+
 ```r
 library(verdifax)
 
@@ -256,7 +258,7 @@ status `probe`.
 
 ## Request signing
 
-Request signing is optional. A client with no signing key sends the same requests as before.
+A trial key, which is what a pilot receives, needs a request key: it seals nothing until one is registered, and the key can then be replaced but not cleared. On a production key, request signing is optional, and a client with no signing key sends the same requests as before.
 
 You can register an Ed25519 public key on your API key, so that each run must also be signed with a private key that only you hold. The key pair is created on your machine, and Verdifax receives only the public key. Signing needs the `sodium` package:
 
