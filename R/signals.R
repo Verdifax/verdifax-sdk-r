@@ -19,7 +19,8 @@
 .SIGNAL_FORM <- "verdifax.signal.v1"
 .SIGNAL_KINDS <- c(
   "run.refused", "run.halted", "run.failed", "policy.changed", "signoff.recorded",
-  "approver.registered", "approver.revoked", "key.created", "key.revoked"
+  "approver.registered", "approver.revoked", "key.created", "key.revoked",
+  "run.published", "run.unpublished"
 )
 .SIGNAL_PAGE_MAX <- 500L
 .SIGNAL_WAIT_MAX_SEC <- 25L
@@ -325,7 +326,7 @@ verdifax_revoke_feed_key <- function(client, id) {
 #'   `https://`.
 #' @param types Optional character vector of signal kinds, each one of
 #'   `run.refused`, `run.halted`, `run.failed`, `policy.changed`,
-#'   `signoff.recorded`, `approver.registered`, `approver.revoked`,
+#'   `signoff.recorded`, `approver.registered`, `approver.revoked`, `run.published`, `run.unpublished`,
 #'   `key.created` and `key.revoked`, with no repeats. `NULL` takes every
 #'   kind.
 #'

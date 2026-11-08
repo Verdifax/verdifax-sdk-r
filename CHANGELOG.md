@@ -1,3 +1,10 @@
+# verdifax 1.6.0
+
+## The account owner publishes the account's records
+
+* `verdifax_publish_run(client, run_id)` makes a record made by any key of the account public on its random link with `POST /account/runs/{id}/publish`, and `verdifax_unpublish_run()` withdraws it with `/unpublish`, keeping the link for a later publish. Both need the owner key and return the run's public state, its links while public, and `publication`, the run publication the call sealed (`verdifax.run-publication.v1`: the run, its record hash, its job and step, the time and its place in the account's signal feed), or `NULL` when the run was already in the asked state. The service's admin key cannot publish another key's record.
+* Signal kinds `run.published` and `run.unpublished`; `verdifax-verify --signals` reads them since v0.24.0.
+
 # verdifax 1.5.0
 
 ## Signal feed
