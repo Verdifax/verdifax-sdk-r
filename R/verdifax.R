@@ -8,7 +8,8 @@
 # helper. R/policies.R holds the policy routes and the policy_context
 # checks. R/accounts.R holds the account routes, used with an account's
 # owner key, and the admin account routes. R/routes.R holds every other
-# route and the provider and admin helpers. R/section0.R holds the
+# route and the provider and admin helpers. R/signals.R holds the signal
+# feed, feed keys, webhooks and failure receipts. R/section0.R holds the
 # canonical hash formulas. README.md lists every exported function.
 #
 # All failures from auto-detection are silently swallowed and the
@@ -18,7 +19,8 @@
 # Dependencies (declared in DESCRIPTION):
 #   httr2 (>= 1.0.0)
 #   jsonlite (>= 1.8.0)
-#   openssl, for SHA-256, here and in R/section0.R
+#   openssl, for SHA-256, here and in R/section0.R, and HMAC-SHA256 in
+#   R/signals.R
 #   sodium (Suggests, needed only for request signing)
 
 # ── Module-level constants ──────────────────────────────────────────────────

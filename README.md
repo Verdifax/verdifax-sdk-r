@@ -149,6 +149,15 @@ GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 42
 | `verdifax_sign_off()` | `GET /signoffs/newest`, then `POST /signoffs`; with `as_owner = TRUE`, `GET /account/signoffs/newest`, then `POST /account/signoffs` |
 | `verdifax_get_signoffs()` | `GET /runs/{id}/signoffs`, or `GET /account/runs/{id}/signoffs` with `as_owner = TRUE` |
 | `verdifax_get_signoff_history()` | `GET /account/signoffs/history` |
+| `verdifax_get_signals()` | `GET /signals`, or `GET /account/signals` with `as_owner = TRUE` |
+| `verdifax_follow_signals()` | `GET /signals` page after page, or `GET /account/signals` with `as_owner = TRUE` |
+| `verdifax_create_feed_key()` | `POST /account/feed-keys` |
+| `verdifax_revoke_feed_key()` | `DELETE /account/feed-keys/{id}` |
+| `verdifax_create_webhook()` | `POST /account/webhooks` |
+| `verdifax_list_webhooks()` | `GET /account/webhooks` |
+| `verdifax_delete_webhook()` | `DELETE /account/webhooks/{id}` |
+| `verdifax_list_webhook_deliveries()` | `GET /account/webhooks/{id}/deliveries` |
+| `verdifax_get_failure_receipt()` | `GET /runs/{id}/failure-receipt` |
 | `verdifax_admin_create_key()` | `POST /admin/keys` |
 | `verdifax_admin_list_keys()` | `GET /admin/keys` |
 | `verdifax_admin_revoke_key()` | `DELETE /admin/keys/{id}` |
@@ -157,9 +166,9 @@ GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 42
 | `verdifax_admin_create_account()` | `POST /admin/accounts` |
 | `verdifax_admin_list_accounts()` | `GET /admin/accounts` |
 
-These make no request: `verdifax_client()`, `verdifax_from_env()`, `verdifax_job()`, `verdifax_capture_environment()`, `verdifax_format_provider_payload()`, `verdifax_sign_request()`, `verdifax_request_key_registration_body()`, `verdifax_request_signature_preimage()`, `verdifax_policy_activation_preimage()`, `verdifax_policy_activation_approval()`, `verdifax_signoff_preimage()`, `verdifax_approver_key_proof()`, `verdifax_generate_request_key()`, `verdifax_validate_hex64()`, `verdifax_validate_route_id()`, `verdifax_dse_dispatch_hash()`, `verdifax_dcae_closure_hash()`, `verdifax_cres_receipt_hash()` and `verdifax_run_statuses()`.
+These make no request: `verdifax_client()`, `verdifax_from_env()`, `verdifax_job()`, `verdifax_capture_environment()`, `verdifax_format_provider_payload()`, `verdifax_sign_request()`, `verdifax_request_key_registration_body()`, `verdifax_request_signature_preimage()`, `verdifax_policy_activation_preimage()`, `verdifax_policy_activation_approval()`, `verdifax_signoff_preimage()`, `verdifax_approver_key_proof()`, `verdifax_verify_webhook()`, `verdifax_signal_event_hash()`, `verdifax_generate_request_key()`, `verdifax_validate_hex64()`, `verdifax_validate_route_id()`, `verdifax_dse_dispatch_hash()`, `verdifax_dcae_closure_hash()`, `verdifax_cres_receipt_hash()` and `verdifax_run_statuses()`.
 
-`verdifax_get_run_artifacts()`, `verdifax_get_public_bundle()`, `verdifax_get_public_bundle_by_token()`, `verdifax_get_policy_history()`, `verdifax_get_account_policy_history()`, `verdifax_get_signoffs()` and `verdifax_get_signoff_history()` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
+`verdifax_get_run_artifacts()`, `verdifax_get_public_bundle()`, `verdifax_get_public_bundle_by_token()`, `verdifax_get_policy_history()`, `verdifax_get_account_policy_history()`, `verdifax_get_signoffs()`, `verdifax_get_signoff_history()` and `verdifax_get_failure_receipt()` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
 
 ## Runs
 
@@ -429,6 +438,44 @@ A member key submits on `/signoffs`, for any result of its account, and reads `/
 
 The verifier reads sign-offs since v0.22.0: `verdifax-verify --signoff FILE` checks a record's or receipt's sign-offs as `verdifax_get_signoffs()` returns them, and `--signoff-history FILE` checks the account's whole chain.
 
+## Signal feed
+
+The signal feed is every control signal Verdifax recorded for the account, in order, each with its sealed entry: a run refused, halted or failed, a policy change, a sign-off, an approver key registered or revoked, and a key created or revoked. Each event is a CloudEvent. The feed cannot show a signal Verdifax never recorded.
+
+The owner key creates a feed key, which reads the feed and nothing else, and can read the same feed itself with `as_owner = TRUE`.
+
+```r
+owner <- verdifax_client(api_key = owner_secret)
+feed_key <- verdifax_create_feed_key(owner, "siem")
+
+# Follow the feed from the start, or from the last sequence you saved. The
+# server holds each read up to 25 seconds for a new event.
+feed <- verdifax_client(api_key = feed_key$secret)
+verdifax_follow_signals(feed, function(event) {
+  message(event$data$sequence, " ", event$type)
+  saveRDS(event$data$sequence, "last-sequence.rds") # your place, to resume
+  TRUE # return FALSE to stop
+}, after = 0)
+```
+
+`verdifax_follow_signals()` reads each page from the `next_after` of the one before, so no event is skipped. When a read fails, it stops with an error of class `verdifax_follow_error` whose `after` is the last sequence handled: call it again with that `after` to go on. `verdifax_get_signals()` reads one page with `after`, `limit` (1 to 500) and `wait` (0 to 25 seconds). Its HTTP timeout is at least the wait plus 30 seconds. `verdifax_signal_event_hash()` recomputes an event's `event_hash`, and `verdifax-verify --signals` checks a saved feed.
+
+A webhook posts each new event to an `https://` address, signed under the Standard Webhooks scheme. A delivery is a copy: the pull feed and the public log are the record. Check each delivery on the raw body bytes, before any JSON parsing:
+
+```r
+hook <- verdifax_create_webhook(owner, "https://hooks.example.com/verdifax",
+                                types = c("run.refused", "run.halted"))
+# Store hook$secret (whsec_...) as a secret. It is shown once.
+
+# In the receiving server, with the request's headers and raw body:
+event <- verdifax_verify_webhook(headers, raw_body, webhook_secret)
+event$data$kind
+```
+
+`verdifax_verify_webhook()` refuses a `webhook-timestamp` more than 300 seconds from now, in either direction, and accepts the delivery when any `v1` signature in `webhook-signature` matches, compared in constant time. A failed check stops with an error of class `verdifax_webhook_error` that says which check failed. `verdifax_list_webhooks()`, `verdifax_delete_webhook()` and `verdifax_list_webhook_deliveries()` manage the subscriptions and show each delivery's attempts.
+
+`verdifax_get_failure_receipt()` returns the failure receipt of a run that failed, as the exact JSON text the server sent.
+
 ## Provider helpers
 
 `verdifax_attest_claude_response()` and `verdifax_attest_openai_response()` attest a prompt and response as one payload: canonical JSON, exactly `{"prompt":...,"provider":...,"response":...}` with sorted keys and no extra whitespace, UTF-8, with `provider` set to `anthropic` or `openai`. `verdifax_format_provider_payload()` builds that text. All four Verdifax SDKs produce the same bytes.
@@ -519,7 +566,7 @@ A signature shows who requested the run, not that they accepted the outcome.
 
 - `httr2 (>= 1.1.0)`, HTTP client
 - `jsonlite (>= 1.8.0)`, JSON serialization
-- `openssl`, SHA-256 for the canonical hash functions
+- `openssl`, SHA-256 for the canonical hash functions and HMAC-SHA256 for checking webhooks
 - `sodium`, optional, needed only for request signing
 
 All are available on CRAN.

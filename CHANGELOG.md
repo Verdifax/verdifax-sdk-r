@@ -1,3 +1,27 @@
+# verdifax 1.5.0
+
+## Signal feed
+
+* The signal feed is every control signal Verdifax recorded for the account, in order, each with its sealed entry: a run refused, halted or failed, a policy change, a sign-off, an approver key registered or revoked, and a key created or revoked. Each event is a CloudEvent that carries its place in the feed and the hash of the event before it. The feed cannot show a signal Verdifax never recorded.
+* `verdifax_get_signals()` reads one page of the feed with a feed key, or the owner key's `/account/signals` with `as_owner = TRUE`. It takes `after`, the last sequence read, `limit` from 1 to 500, and `wait` from 0 to 25 seconds, and refuses anything else before sending. Its HTTP timeout is at least the wait plus 30 seconds, whatever the client's own timeout.
+* `verdifax_follow_signals()` reads page after page from `after` and calls a handler on each event, in order, until the handler returns `FALSE`. It reads each page from the `next_after` of the one before, so no event is skipped, and asks the server to wait for an event when a page is empty. A failed read is retried with the client's retry policy. It never loses its place: when a read fails, a page is out of order, or the handler raises an error, it stops with an error of class `verdifax_follow_error` whose `after` is the last sequence handled.
+* `verdifax_create_feed_key()` and `verdifax_revoke_feed_key()` let the owner key create and revoke feed keys. A feed key reads the feed and nothing else.
+* `verdifax_signal_event_hash()` recomputes an event's `event_hash` without calling the server. It matches the vector the four SDKs share. `verdifax-verify --signals` checks a saved feed.
+
+## Webhooks
+
+* `verdifax_create_webhook()`, `verdifax_list_webhooks()`, `verdifax_delete_webhook()` and `verdifax_list_webhook_deliveries()` let the owner key subscribe an `https://` address to some or all signal kinds, list and delete the subscriptions, and read a subscription's delivery log. The types must be distinct signal kinds, and a bad address or type is refused before sending. The server checks the address too.
+* A webhook delivery is a copy: the pull feed and the public log are the record.
+* `verdifax_verify_webhook()` checks a delivery under the Standard Webhooks scheme and returns its CloudEvent. It takes the `whsec_` secret, matches header names whatever their case, refuses a `webhook-timestamp` more than `tolerance_seconds` (300 by default) from now in either direction, and accepts the delivery when any `v1` signature in `webhook-signature` matches the raw body, compared in constant time. A failed check stops with an error of class `verdifax_webhook_error` that says which check failed. The secret is never shown in a message. It matches the vector the four SDKs share.
+
+## Failure receipts
+
+* `verdifax_get_failure_receipt()` returns the failure receipt of a run that failed as the exact JSON text the server sent. A failed run from before failure receipts answers HTTP 404.
+
+## Other changes
+
+* The default user agent is `verdifax-r/1.5.0`.
+
 # verdifax 1.4.0
 
 ## Sign-off
