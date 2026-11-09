@@ -73,6 +73,9 @@ test_that("every remaining GET route calls its path", {
 test_that("a share token is escaped in the path", {
   sent <- capture(verdifax_get_public_bundle_by_token(test_client(), "a b/c"))
   expect_match(sent[[1]]$raw_url, "/public/runs/a%20b%2Fc/bundle.json", fixed = TRUE)
+  sent <- capture(verdifax_get_public_receipt_by_token(test_client(), "a b/c"))
+  expect_match(sent[[1]]$raw_url, "/public/runs/a%20b%2Fc/receipt.json", fixed = TRUE)
+  expect_error(verdifax_get_public_receipt_by_token(test_client(), ""), "token")
 })
 
 test_that("attestation paging reaches the query", {
@@ -372,10 +375,10 @@ test_that("GET, HEAD and OPTIONS carry the retry policy and POST does not", {
   expect_null(verdifax:::.build_request(off, "/x", NULL, method = "GET")$policies$retry_max_tries)
 })
 
-test_that("the default user agent names version 1.6.0", {
+test_that("the default user agent names version 1.7.0", {
   client <- verdifax_client(base_url = "http://mock.invalid")
   req <- verdifax:::.build_request(client, "/x", NULL, method = "GET")
-  expect_equal(httr2::req_get_headers(req)[["User-Agent"]], "verdifax-r/1.6.0")
+  expect_equal(httr2::req_get_headers(req)[["User-Agent"]], "verdifax-r/1.7.0")
 })
 
 test_that("user_agent reaches the request", {

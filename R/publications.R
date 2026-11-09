@@ -18,7 +18,9 @@
 #' @param run_id The run's id, a positive whole number.
 #'
 #' @return Parsed API response list: `ok`, `run_id`, `public`,
-#'   `public_bundle_url` while public, `verify_url` and `publication`, the
+#'   `public_bundle_url` while public and the run has a bundle, or
+#'   `public_receipt_url` while public and the run stopped (R156),
+#'   `verify_url` and `publication`, the
 #'   sealed record (`format`, `action`, `run_id`, `record_hash`, `job_id`,
 #'   `step_id`, `changed_at`, `signal`, `publication_hash`, `anchor`) or
 #'   `NULL` when the run was already in the asked state.

@@ -71,3 +71,16 @@ test_that("publish_run refuses a bad run id before sending", {
 test_that("the publication kinds are signal kinds", {
   expect_true(all(c("run.published", "run.unpublished") %in% .SIGNAL_KINDS))
 })
+
+
+test_that("publishing a stopped run returns its receipt address and no bundle address (R156)", {
+  stopped <- paste0(
+    '{"ok":true,"run_id":42,"public":true,"public_receipt_url":"https://api.verdifax.com/public/runs/tok/receipt.json",',
+    '"verify_url":"https://verdifax.com/verify/?pt=tok&record=receipt","publication":null}'
+  )
+  httr2::with_mocked_responses(function(req) json_response(stopped), {
+    answer <- verdifax_publish_run(owner_client(), 42)
+    expect_equal(answer$public_receipt_url, "https://api.verdifax.com/public/runs/tok/receipt.json")
+    expect_null(answer$public_bundle_url)
+  })
+})

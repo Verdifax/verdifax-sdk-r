@@ -349,6 +349,29 @@ verdifax_get_public_bundle_by_token <- function(client, token) {
   httr2::resp_body_string(httr2::req_perform(req))
 }
 
+#' The sealed receipt of a published stopped run a share token points to.
+#'
+#' A refusal, a halt or a failure is published as its sealed receipt: the
+#' same document the key holder reads from the run's receipt route. Needs no
+#' API key.
+#'
+#' @inheritParams verdifax_health
+#' @param token The share token.
+#'
+#' @return The exact JSON text the server sent, as a single string.
+#'
+#' @export
+verdifax_get_public_receipt_by_token <- function(client, token) {
+  if (!is.character(token) || length(token) != 1 || is.na(token) || !nzchar(token)) {
+    stop("token is required", call. = FALSE)
+  }
+  # req_url_path() would escape the escaped token a second time.
+  escaped <- utils::URLencode(token, reserved = TRUE)
+  req <- .get(client, "/public/runs")
+  req <- httr2::req_url(req, paste0(client$base_url, "/public/runs/", escaped, "/receipt.json"))
+  httr2::resp_body_string(httr2::req_perform(req))
+}
+
 #' The CRES deletion receipts bound to a run.
 #'
 #' @inheritParams verdifax_verify_run
