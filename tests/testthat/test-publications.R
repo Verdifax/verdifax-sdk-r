@@ -69,7 +69,7 @@ test_that("publish_run refuses a bad run id before sending", {
 })
 
 test_that("the publication kinds are signal kinds", {
-  expect_true(all(c("run.published", "run.unpublished") %in% .SIGNAL_KINDS))
+  expect_true(all(c("run.published", "run.unpublished") %in% verdifax:::.SIGNAL_KINDS))
 })
 
 

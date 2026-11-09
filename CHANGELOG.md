@@ -1,3 +1,7 @@
+# verdifax 1.7.1
+
+* The same code as 1.7.0, whose tagged commit failed one test in CI: the test read the package's internal list of signal kinds without naming the package, which works only when the tests run inside the package. It now names it, and the release is tagged on a commit whose CI passed.
+
 # verdifax 1.7.0
 
 ## A published stopped run is served as its sealed receipt
