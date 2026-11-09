@@ -358,17 +358,23 @@ verdifax_capture_environment <- function(declared_seeds = list(),
 }
 
 
-# The record_hash of a refused or halted run, from the error body.
-.error_record_hash <- function(error) {
+# A string field of a refused or halted run's error body, or NULL.
+.error_field <- function(error, name) {
   tryCatch({
-    value <- jsonlite::fromJSON(httr2::resp_body_string(error$resp), simplifyVector = FALSE)[["record_hash"]]
+    value <- jsonlite::fromJSON(httr2::resp_body_string(error$resp), simplifyVector = FALSE)[[name]]
     if (is.character(value) && length(value) == 1 && nzchar(value)) value else NULL
   }, error = function(e) NULL)
 }
 
+# The record_hash of a refused or halted run, from the error body.
+.error_record_hash <- function(error) .error_field(error, "record_hash")
+
 # Posts one execute body. A refused or halted run answers with an error
 # status and still leaves a record, so the same error goes on, holding the
-# server's message, that record's hash and the text that was signed.
+# server's message, that record's hash, the text that was signed and, for a
+# run the AI review halted, the trace it checked (aivp_trace_text). A run
+# that completes carries the trace as `aivp_trace_text` and the sealed
+# review as `manifest$AivpReview`.
 .post_execute <- function(client, path, body) {
   wire <- .attach_signature(client, body)
   signed_request <- wire[["signed_request"]]
@@ -378,6 +384,9 @@ verdifax_capture_environment <- function(declared_seeds = list(),
     httr2_http = function(error) {
       error$record_hash <- .error_record_hash(error)
       error$signed_request <- signed_request
+      # The text the AI review checked, on a run its review halted:
+      # returned once, and the halt receipt seals its hash.
+      error$aivp_trace_text <- .error_field(error, "aivp_trace_text")
       stop(error)
     }
   )

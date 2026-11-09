@@ -1,3 +1,10 @@
+# verdifax 1.9.0
+
+## The AI review says what it found, and the trace that proves it comes back to you
+
+* When an account's AI review runs on a step's AI output, the record seals what it found: the review setup (prompt and model), the SHA-256 of the trace it checked, the checker, what the account policy chose a contradiction finding does (`halt` or `record`), the outcome (`clean`, `halted` or `recorded`) and the finding (two trace nodes and the opposing terms). Verdifax returns the trace once and does not store it; keep it to re-run the check with `verdifax-verify --aivp-trace` (or `--aivp-traces` for a job), since v0.27.0.
+* A completed run's result carries the trace as `aivp_trace_text` and the sealed review as `manifest$AivpReview`; the error of a run the review halted carries the trace as `aivp_trace_text`.
+
 # verdifax 1.8.0
 
 ## A publication says who decided

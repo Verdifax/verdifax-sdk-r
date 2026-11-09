@@ -477,6 +477,28 @@ test_that("attest keeps its error and adds the record hash", {
   expect_equal(httr2::resp_status(err$resp), 422)
 })
 
+test_that("a run the AI review halted keeps the trace on its error", {
+  trace <- "1. The vault is always locked.\\n\\n2. The vault is never locked."
+  halted <- json_response(sprintf(
+    "{\"ok\":false,\"run_id\":3,\"record_hash\":\"%s\",\"error\":\"aivp refused\",\"aivp_trace_text\":\"%s\"}", .hash_c, trace
+  ), 422)
+  capture(err <- tryCatch(run_attest(unsigned_client(), NULL), error = function(e) e), list(halted))
+  expect_equal(err$record_hash, .hash_c)
+  expect_equal(err$aivp_trace_text, "1. The vault is always locked.\n\n2. The vault is never locked.")
+})
+
+test_that("a released run carries the trace and the sealed review", {
+  body <- sprintf(paste0(
+    "{\"ok\":true,\"run_id\":4,\"record_hash\":\"%s\",\"aivp_trace_text\":\"one\\n\\ntwo\",",
+    "\"manifest\":{\"AivpReview\":{\"contradiction_mode\":\"record\",\"contradiction_outcome\":\"recorded\",",
+    "\"finding\":{\"node_a\":\"node-0001\",\"node_b\":\"node-0002\",\"term\":\"always\",\"opposite\":\"never\"}}}}"
+  ), .hash_d)
+  capture(res <- run_attest(unsigned_client(), NULL), list(json_response(body)))
+  expect_equal(res$aivp_trace_text, "one\n\ntwo")
+  expect_equal(res$manifest$AivpReview$contradiction_outcome, "recorded")
+  expect_equal(res$manifest$AivpReview$finding$term, "always")
+})
+
 test_that("a signed refusal holds the text that was signed", {
   need_sodium()
   sent <- capture(
