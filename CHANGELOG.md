@@ -1,3 +1,9 @@
+# verdifax 1.8.0
+
+## A publication says who decided
+
+* A run publication is now `verdifax.run-publication.v2` and seals who decided: `owner`, the account's owner key, or `verdifax_admin`, a Verdifax admin key, which can withdraw any public record and publish only records it made itself. Every change to a record's public state, Verdifax's included, is now sealed in the feed of the record's account. The publication list carries it as `decided_by`. Publications sealed before v2 are v1, carry no `decided_by`, and were the owner's. `verdifax-verify --signals` reads v2 since v0.26.0.
+
 # verdifax 1.7.1
 
 * The same code as 1.7.0, whose tagged commit failed one test in CI: the test read the package's internal list of signal kinds without naming the package, which works only when the tests run inside the package. It now names it, and the release is tagged on a commit whose CI passed.

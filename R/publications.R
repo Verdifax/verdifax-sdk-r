@@ -1,9 +1,12 @@
 # The account owner publishes the account's records. A sealed record belongs
 # to the account that made it, so only the account's owner key makes it
-# public on its random link, or withdraws it. Each decision is a run
-# publication, verdifax.run-publication.v1: sealed, placed in the account's
-# signal feed as a run.published or run.unpublished event, and anchored on
-# the public log. verdifax-verify --signals reads it since v0.24.0.
+# public on its random link; the owner key withdraws it, and a Verdifax admin
+# key can also withdraw it. Each decision is a run publication,
+# verdifax.run-publication.v2, sealed with who decided (owner or
+# verdifax_admin), placed in the account's signal feed as a run.published or
+# run.unpublished event, and anchored on the public log. A v1 publication
+# carries no decided_by and was the owner's. verdifax-verify --signals reads
+# v1 since v0.24.0 and v2 since v0.26.0.
 
 #' Make one of the account's records public on its random link.
 #'
@@ -21,7 +24,7 @@
 #'   `public_bundle_url` while public and the run has a bundle, or
 #'   `public_receipt_url` while public and the run stopped (R156),
 #'   `verify_url` and `publication`, the
-#'   sealed record (`format`, `action`, `run_id`, `record_hash`, `job_id`,
+#'   sealed record (`format`, `action`, `decided_by`, `run_id`, `record_hash`, `job_id`,
 #'   `step_id`, `changed_at`, `signal`, `publication_hash`, `anchor`) or
 #'   `NULL` when the run was already in the asked state.
 #' @export

@@ -16,8 +16,8 @@ json_response <- function(text, status = 200) {
 
 .answer <- paste0(
   '{"ok":true,"run_id":41,"public":true,"public_bundle_url":"https://api.verdifax.com/public/runs/tok/bundle.json",',
-  '"verify_url":"https://verdifax.com/verify/?pt=tok","publication":{"format":"verdifax.run-publication.v1",',
-  '"action":"run.published","run_id":41,"record_hash":"', strrep("a", 64), '","job_id":"loan-1","step_id":"verdict",',
+  '"verify_url":"https://verdifax.com/verify/?pt=tok","publication":{"format":"verdifax.run-publication.v2",',
+  '"action":"run.published","decided_by":"owner","run_id":41,"record_hash":"', strrep("a", 64), '","job_id":"loan-1","step_id":"verdict",',
   '"changed_at":"2026-11-08T20:00:00Z","signal":{"signal_account":"account-7","signal_sequence":9,',
   '"signal_previous_hash":"', strrep("b", 64), '"},"publication_hash":"', strrep("c", 64), '","later_field":"kept"}}'
 )
@@ -45,6 +45,7 @@ test_that("publish_run and unpublish_run post to the owner routes and return the
     expect_equal(published$run_id, 41)
     expect_true(published$public)
     expect_equal(published$publication$action, "run.published")
+    expect_equal(published$publication$decided_by, "owner")
     expect_equal(published$publication$job_id, "loan-1")
     expect_equal(published$publication$signal$signal_sequence, 9)
     expect_equal(published$publication$later_field, "kept")
