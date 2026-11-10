@@ -172,7 +172,8 @@
   .send(client, "POST", base, list(document = .policy_document(document)))
 }
 
-.test_policy_at <- function(client, base, caller, inputs, document, document_hash) {
+.test_policy_at <- function(client, base, caller, inputs, document, document_hash,
+                            ai_output_declared = FALSE) {
   if (is.null(document) == is.null(document_hash)) {
     stop(caller, " needs exactly one of document and document_hash", call. = FALSE)
   }
@@ -182,6 +183,12 @@
   } else {
     verdifax_validate_hex64(document_hash, "document_hash")
     body$document_hash <- as.vector(document_hash)
+  }
+  if (!is.logical(ai_output_declared) || length(ai_output_declared) != 1L || is.na(ai_output_declared)) {
+    stop("ai_output_declared must be TRUE or FALSE", call. = FALSE)
+  }
+  if (isTRUE(ai_output_declared)) {
+    body$ai_output_declared <- TRUE
   }
   .send(client, "POST", paste0(base, "/test"), body)
 }
@@ -289,13 +296,18 @@ verdifax_get_policy <- function(client, document_hash) {
 #'   `verdifax_upload_policy()`.
 #' @param document_hash Optional 64-char lowercase hex hash of a document
 #'   already uploaded under this key.
+#' @param ai_output_declared `TRUE` when the request being tried declares an
+#'   AI output, as `ai_output_text` does on a run: a policy that requires an
+#'   AI review refuses a step without one. Sent only when `TRUE`.
 #'
 #' @return Parsed API response list with `ok`, `sealed` (always `FALSE`),
 #'   `outcome`, `fired_rule_id` and `reason_code`.
 #'
 #' @export
-verdifax_test_policy <- function(client, inputs, document = NULL, document_hash = NULL) {
-  .test_policy_at(client, .POLICIES_PATH, "verdifax_test_policy", inputs, document, document_hash)
+verdifax_test_policy <- function(client, inputs, document = NULL, document_hash = NULL,
+                                 ai_output_declared = FALSE) {
+  .test_policy_at(client, .POLICIES_PATH, "verdifax_test_policy", inputs, document, document_hash,
+                  ai_output_declared)
 }
 
 #' The chain of this key's policy changes, oldest first.

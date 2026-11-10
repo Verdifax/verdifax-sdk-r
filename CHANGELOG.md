@@ -1,3 +1,12 @@
+# verdifax 1.10.0
+
+## Successful runs in the feed, restore gaps, a required AI review, reports that print the AI's answer, and the account's time zone
+
+* The signal feed carries two new kinds: `run.sealed`, a successful run's record naming the run and the exact record it sealed, and `chain.gap`, a restore gap that names the places a chain skips after a restore from backup. `verdifax-verify --signals` reads both since v0.28.0.
+* `verdifax_test_policy()` and `verdifax_test_account_policy()` take `ai_output_declared = TRUE` to test a policy whose `ai_review` sets `"required": true`: the server refuses, with reason `ai_review_required`, a step under the requirement that declares no AI output.
+* `verdifax_download_audit_pdf(client, run_id, format, ai_output_text = ...)` sends the AI's exact answer, and the report prints it on its first page, marked as supplied, only when its SHA-256 is the hash the record seals; other text stops with the server's reason (HTTP 422). `verdifax_download_public_audit_pdf()` reads a published record's audit PDF with no key.
+* `verdifax_set_account_time_zone()` (owner key) sets the second time zone the account's audit PDFs show beside UTC: an IANA zone, `"none"` for UTC alone, or `""` for the server region's zone.
+
 # verdifax 1.9.0
 
 ## The AI review says what it found, and the trace that proves it comes back to you

@@ -54,6 +54,27 @@ verdifax_get_account <- function(client) {
   .perform(.get(client, .ACCOUNT_PATH))
 }
 
+#' Choose the second time zone on the account's audit reports.
+#'
+#' Calls `PUT /account/time-zone` with the account's owner key. Every audit
+#' report shows times in UTC and one more zone: pass an IANA zone such as
+#' `"Europe/London"`, `"none"` for UTC alone, or `""` for the zone of the
+#' server's region, which an account that never chose sees. It changes how
+#' times are displayed, never a sealed value.
+#'
+#' @inheritParams verdifax_get_account
+#' @param time_zone A single string, at most 64 characters.
+#'
+#' @return Parsed API response list with `ok`, `account_id` and `time_zone`.
+#'
+#' @export
+verdifax_set_account_time_zone <- function(client, time_zone) {
+  if (!is.character(time_zone) || length(time_zone) != 1L || is.na(time_zone) || nchar(time_zone) > 64L) {
+    stop("time_zone must be a single string of at most 64 characters", call. = FALSE)
+  }
+  .send(client, "PUT", paste0(.ACCOUNT_PATH, "/time-zone"), list(time_zone = time_zone))
+}
+
 
 # ── Member keys ─────────────────────────────────────────────────────────────
 
@@ -297,10 +318,11 @@ verdifax_get_account_policy <- function(client, document_hash) {
 #'   `outcome`, `fired_rule_id` and `reason_code`.
 #'
 #' @export
-verdifax_test_account_policy <- function(client, inputs, document = NULL, document_hash = NULL) {
+verdifax_test_account_policy <- function(client, inputs, document = NULL, document_hash = NULL,
+                                         ai_output_declared = FALSE) {
   .test_policy_at(
     client, .ACCOUNT_POLICIES_PATH, "verdifax_test_account_policy",
-    inputs, document, document_hash
+    inputs, document, document_hash, ai_output_declared
   )
 }
 

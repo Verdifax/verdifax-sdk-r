@@ -122,6 +122,37 @@ test_that("verdifax_download_audit_pdf returns raw bytes", {
   expect_identical(out, pdf)
 })
 
+test_that("reports carry the answer when given, and the public report goes by token", {
+  pdf_reply <- function(req) {
+    body <- httr2::req_get_body(req)
+    if (!is.null(body) && identical(body$ai_output_text, "wrong")) {
+      return(reply("{\"error\":\"supplied answer refused: nothing was printed\"}", status = 422))
+    }
+    httr2::response(status_code = 200, headers = "Content-Type: application/pdf", body = charToRaw("%PDF-report"))
+  }
+  client <- test_client()
+  sent <- capture({
+    verdifax_download_audit_pdf(client, 7, "brief", ai_output_text = "the answer")
+    verdifax_download_public_audit_pdf(client, "a b/c", "legal")
+    verdifax_download_public_audit_pdf(client, "tok", ai_output_text = "the answer")
+  }, pdf_reply)
+  expect_length(sent, 3)
+  expect_equal(sent[[1]]$method, "POST")
+  expect_equal(sent[[1]]$url$path, "/runs/7/report.pdf")
+  expect_equal(sent[[1]]$body, list(format = "brief", ai_output_text = "the answer"))
+  expect_equal(sent[[2]]$method, "GET")
+  expect_match(sent[[2]]$raw_url, "/public/runs/a%20b%2Fc/report.pdf?format=legal", fixed = TRUE)
+  expect_equal(sent[[3]]$method, "POST")
+  expect_match(sent[[3]]$raw_url, "/public/runs/tok/report.pdf", fixed = TRUE)
+  expect_equal(sent[[3]]$body, list(format = "comprehensive", ai_output_text = "the answer"))
+  expect_error(
+    httr2::with_mocked_responses(pdf_reply, verdifax_download_audit_pdf(client, 7, ai_output_text = "wrong")),
+    "nothing was printed"
+  )
+  expect_error(verdifax_download_audit_pdf(client, 7, ai_output_text = ""), "ai_output_text")
+  expect_error(verdifax_download_public_audit_pdf(client, ""), "token")
+})
+
 test_that("verdifax_dcae_verify posts the bundle", {
   bundle <- list(envelope_id = "e", manifest_hash = strrep("a", 64))
   sent <- capture(
@@ -375,10 +406,10 @@ test_that("GET, HEAD and OPTIONS carry the retry policy and POST does not", {
   expect_null(verdifax:::.build_request(off, "/x", NULL, method = "GET")$policies$retry_max_tries)
 })
 
-test_that("the default user agent names version 1.9.0", {
+test_that("the default user agent names version 1.10.0", {
   client <- verdifax_client(base_url = "http://mock.invalid")
   req <- verdifax:::.build_request(client, "/x", NULL, method = "GET")
-  expect_equal(httr2::req_get_headers(req)[["User-Agent"]], "verdifax-r/1.9.0")
+  expect_equal(httr2::req_get_headers(req)[["User-Agent"]], "verdifax-r/1.10.0")
 })
 
 test_that("user_agent reaches the request", {

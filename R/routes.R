@@ -288,15 +288,60 @@ verdifax_get_run_report <- function(client, run_id) {
 
 #' The audit PDF for a run.
 #'
+#' With `ai_output_text`, the AI's exact answer, the report prints it on its
+#' first page, marked as supplied by the caller, only when its SHA-256 is
+#' the hash the record seals; other text is refused with HTTP 422 and
+#' nothing is printed. Verdifax stores only the hash.
+#'
 #' @inheritParams verdifax_verify_run
 #' @param format One of `"brief"`, `"auditor"`, `"legal"` or
 #'   `"comprehensive"`.
+#' @param ai_output_text The AI's exact answer, or `NULL`.
 #'
 #' @return A raw vector of the PDF bytes. Save it with `writeBin()`.
 #'
 #' @export
-verdifax_download_audit_pdf <- function(client, run_id, format = "comprehensive") {
-  req <- .get(client, .run_path(run_id, "/report.pdf"), .query(format = format))
+verdifax_download_audit_pdf <- function(client, run_id, format = "comprehensive", ai_output_text = NULL) {
+  .report_pdf(client, .run_path(run_id, "/report.pdf"), NULL, format, ai_output_text)
+}
+
+#' The audit PDF of a published record a share token points to.
+#'
+#' Needs no API key. `ai_output_text` prints the answer as
+#' [verdifax_download_audit_pdf()] prints it.
+#'
+#' @inheritParams verdifax_download_audit_pdf
+#' @param token The share token.
+#'
+#' @return A raw vector of the PDF bytes. Save it with `writeBin()`.
+#'
+#' @export
+verdifax_download_public_audit_pdf <- function(client, token, format = "comprehensive", ai_output_text = NULL) {
+  if (!is.character(token) || length(token) != 1 || is.na(token) || !nzchar(token)) {
+    stop("token is required", call. = FALSE)
+  }
+  # req_url_path() would escape the escaped token a second time.
+  url <- paste0(client$base_url, "/public/runs/", utils::URLencode(token, reserved = TRUE), "/report.pdf")
+  .report_pdf(client, "/public/runs", url, format, ai_output_text)
+}
+
+# A GET with the format, or, with the answer, a POST carrying both.
+.report_pdf <- function(client, path, url, format, ai_output_text) {
+  if (is.null(ai_output_text)) {
+    req <- .build_request(client, path, NULL, method = "GET", query = .query(format = format))
+  } else {
+    if (!is.character(ai_output_text) || length(ai_output_text) != 1 || is.na(ai_output_text) ||
+        !nzchar(ai_output_text)) {
+      stop("ai_output_text must be the AI's exact answer, a single non-empty string", call. = FALSE)
+    }
+    body <- list(format = format, ai_output_text = enc2utf8(ai_output_text))
+    req <- .build_request(client, path, body, method = "POST")
+  }
+  if (!is.null(url)) {
+    query <- if (is.null(ai_output_text)) paste0("?format=", utils::URLencode(format, reserved = TRUE)) else ""
+    req <- httr2::req_url(req, paste0(url, query))
+  }
+  req <- httr2::req_error(req, body = .error_detail)
   httr2::resp_body_raw(httr2::req_perform(req))
 }
 

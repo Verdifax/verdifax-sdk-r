@@ -104,7 +104,8 @@ GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 42
 | `verdifax_export_runs_csv()` | `GET /runs/export?format=csv` |
 | `verdifax_get_run_artifacts()` | `GET /runs/{id}/artifacts` |
 | `verdifax_get_run_report()` | `GET /runs/{id}/report` |
-| `verdifax_download_audit_pdf()` | `GET /runs/{id}/report.pdf` |
+| `verdifax_download_audit_pdf()` | `GET /runs/{id}/report.pdf`, or `POST` with `ai_output_text`, printed when its SHA-256 is the sealed hash |
+| `verdifax_download_public_audit_pdf()` | `GET` or `POST /public/runs/{token}/report.pdf`, no key |
 | `verdifax_get_allow_token()` | `GET /runs/{id}/allow-token` |
 | `verdifax_get_deny_receipt()` | `GET /runs/{id}/deny-receipt` |
 | `verdifax_get_ccv_halt_receipt()` | `GET /runs/{id}/ccv-halt-receipt` |
