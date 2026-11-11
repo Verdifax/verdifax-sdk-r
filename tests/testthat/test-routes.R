@@ -406,10 +406,10 @@ test_that("GET, HEAD and OPTIONS carry the retry policy and POST does not", {
   expect_null(verdifax:::.build_request(off, "/x", NULL, method = "GET")$policies$retry_max_tries)
 })
 
-test_that("the default user agent names version 1.10.0", {
+test_that("the default user agent names version 1.11.0", {
   client <- verdifax_client(base_url = "http://mock.invalid")
   req <- verdifax:::.build_request(client, "/x", NULL, method = "GET")
-  expect_equal(httr2::req_get_headers(req)[["User-Agent"]], "verdifax-r/1.10.0")
+  expect_equal(httr2::req_get_headers(req)[["User-Agent"]], "verdifax-r/1.11.0")
 })
 
 test_that("user_agent reaches the request", {

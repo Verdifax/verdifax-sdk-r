@@ -20,7 +20,7 @@
 .SIGNAL_KINDS <- c(
   "run.refused", "run.halted", "run.failed", "policy.changed", "signoff.recorded",
   "approver.registered", "approver.revoked", "key.created", "key.revoked",
-  "run.published", "run.unpublished", "chain.gap", "run.sealed"
+  "run.published", "run.unpublished", "chain.gap", "run.sealed", "chain.interrupted"
 )
 .SIGNAL_PAGE_MAX <- 500L
 .SIGNAL_WAIT_MAX_SEC <- 25L

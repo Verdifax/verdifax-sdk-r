@@ -14,6 +14,9 @@ jobs:
   test:
     # Ubuntu 24.04 because the package snapshot below is built for it.
     runs-on: ubuntu-24.04
+    # A hung job fails here, not at GitHub's default limit: about three times
+    # its longest recent run (1.2 min) (round 57).
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
