@@ -884,3 +884,23 @@ test_that("verdifax_pending_signoffs lists required runs without an approval in 
   expect_identical(verdifax_pending_signoffs(events), c(12L, 13L))
   expect_error(verdifax_pending_signoffs(list(ev(1, "run.sealed", list()))), "names no run")
 })
+
+# Round 59, N15 and N19: a job sign-off on a run's record counts, and the
+# job's decision governs the record's own, as the verifier reads it.
+test_that("verdifax_pending_signoffs reads a job sign-off as the verifier does", {
+  ev <- function(seq, kind, entry) list(id = paste0("account-7/", seq), data = list(kind = kind, sequence = seq, entry = entry))
+  so <- function(run, decision, kind) list(decision = decision, target = list(kind = kind, run_id = run))
+  events <- list(
+    ev(1, "run.sealed", list(run_id = 20, signoff_required = TRUE)),
+    ev(2, "run.sealed", list(run_id = 21, signoff_required = TRUE)),
+    ev(3, "run.sealed", list(run_id = 22, signoff_required = TRUE)),
+    ev(4, "signoff.recorded", so(20, "approve", "job")),
+    ev(5, "signoff.recorded", so(21, "reject", "job")),
+    ev(6, "signoff.recorded", so(21, "approve", "record")),
+    ev(7, "signoff.recorded", so(22, "reject", "record")),
+    ev(8, "signoff.recorded", so(22, "approve", "job"))
+  )
+  # 20: approved by its job. 21: the job's rejection governs its own
+  # approval. 22: the job's approval governs its own rejection.
+  expect_identical(verdifax_pending_signoffs(events), 21L)
+})

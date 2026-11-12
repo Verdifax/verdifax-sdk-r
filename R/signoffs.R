@@ -512,7 +512,12 @@ verdifax_get_signoffs <- function(client, run_id, as_owner = FALSE) {
 
 #' The account's whole chain of sign-offs, oldest first.
 #'
-#' Calls `GET /account/signoffs/history` with the account's owner key. Save
+#' Calls `GET /account/signoffs/history` with the account's owner key. The
+#' list holds the sign-offs, with restore gaps and interrupted records in
+#' the places they close, and last the chain's head statement
+#' (`verdifax.signoff-head.v1`), anchored on the public log, whenever the
+#' chain holds a place. If the head could not be anchored it is left out,
+#' and `verdifax-verify` then cannot call the history complete. Save
 #' the text to a file and check it with
 #' `verdifax-verify --signoff-history FILE`. It is not parsed, so what you
 #' save is what the server sent.

@@ -624,10 +624,12 @@ verdifax_get_failure_receipt <- function(client, run_id) {
 #' Round 58, B7. A policy rule can require a person's sign-off on the
 #' results it allows; each such run's `run.sealed` event says
 #' `signoff_required`. This returns, in feed order, those runs on whose
-#' record no approval is in force: the last sign-off recorded on the record,
-#' if any, is not an approval. Pass the account's feed from its start, or a
-#' page that includes each run's sign-offs, so a sign-off recorded later is
-#' seen.
+#' record no approval is in force. The decision in force is read as
+#' `verdifax-verify` reads it: the last job sign-off on the run governs when
+#' there is one, and otherwise the last record sign-off; a receipt sign-off
+#' does not name a record (round 59, N15 and N19). Pass the account's feed
+#' from its start, or a page that includes each run's sign-offs, so a
+#' sign-off recorded later is seen.
 #'
 #' @param events A list of feed events, as `verdifax_get_signals()` returns
 #'   in its `events`.
@@ -637,7 +639,8 @@ verdifax_get_failure_receipt <- function(client, run_id) {
 #' @export
 verdifax_pending_signoffs <- function(events) {
   order <- integer(0)
-  latest <- list()
+  latest_job <- list()
+  latest_record <- list()
   for (e in events) {
     data <- e$data
     entry <- data$entry
@@ -651,11 +654,19 @@ verdifax_pending_signoffs <- function(events) {
       }
     } else if (identical(data$kind, "signoff.recorded")) {
       target <- entry$target
-      if (identical(target$kind, "record") && is.numeric(target$run_id)) {
-        latest[[as.character(target$run_id)]] <- entry$decision
+      if (is.numeric(target$run_id)) {
+        if (identical(target$kind, "job")) {
+          latest_job[[as.character(target$run_id)]] <- entry$decision
+        } else if (identical(target$kind, "record")) {
+          latest_record[[as.character(target$run_id)]] <- entry$decision
+        }
       }
     }
   }
-  keep <- vapply(order, function(run) !identical(latest[[as.character(run)]], "approve"), logical(1))
+  in_force <- function(run) {
+    key <- as.character(run)
+    if (!is.null(latest_job[[key]])) latest_job[[key]] else latest_record[[key]]
+  }
+  keep <- vapply(order, function(run) !identical(in_force(run), "approve"), logical(1))
   order[keep]
 }

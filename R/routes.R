@@ -435,8 +435,14 @@ verdifax_get_public_receipt_by_token <- function(client, token) {
 #' The sign-off of a published run a share token points to.
 #'
 #' The facts the run's public audit report prints: `decision_in_force`, and
-#' for a step of a job, `job`, the job's decision on its final step, which
-#' decides for every step. Needs no API key. The note, the approver key and
+#' for a step of a job, `job`, the job's sign-off on its final step, the
+#' decision on the whole job. `decision_in_force` names the kind of sign-off
+#' in force (`signed_as`: record, receipt or job), its place (`sequence`)
+#' and time (`signed_at`) and, when the job's decision governs, this
+#' result's own latest decision (`own_decision`). It is `NULL` when nothing
+#' is signed off, and for a step whose job's sign-offs could not be read,
+#' since the job's decision would govern.
+#' Needs no API key. The note, the approver key and
 #' the signatures are not served; `verdifax-verify --signoff` checks them
 #' from the account's sign-off records.
 #'

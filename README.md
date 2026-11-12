@@ -417,13 +417,16 @@ signoff <- verdifax_sign_off(
 signoff$sequence
 
 # The sign-offs on the run, oldest first, as the exact text the server sent.
-# The newest is the decision in force. Save it and check it offline beside
-# the run's record.
+# The newest is the decision in force, except on a job's final step, where
+# the newest sign-off on the whole job governs. Save it and check it offline
+# beside the run's record.
 writeLines(verdifax_get_signoffs(member, 42), "signoffs.json", sep = "")
 writeLines(verdifax_get_run_artifacts(member, 42), "bundle.json", sep = "")
 # verdifax-verify --signoff signoffs.json bundle.json
 
 # The owner saves the account's whole chain and checks it offline.
+# The chain ends with its head statement, anchored on the public log, so the
+# verifier reports the history complete as of that time (since v0.31.0).
 writeLines(verdifax_get_signoff_history(owner), "signoff-history.json", sep = "")
 # verdifax-verify --signoff-history signoff-history.json
 
@@ -465,7 +468,7 @@ verdifax_follow_signals(feed, function(event) {
 
 `verdifax_follow_signals()` reads each page from the `next_after` of the one before, so no event is skipped. When a read fails, it stops with an error of class `verdifax_follow_error` whose `after` is the last sequence handled: call it again with that `after` to go on. `verdifax_get_signals()` reads one page with `after`, `limit` (1 to 500) and `wait` (0 to 25 seconds). Its HTTP timeout is at least the wait plus 30 seconds. `verdifax_signal_event_hash()` recomputes an event's `event_hash`, and `verdifax-verify --signals` checks a saved feed.
 
-`verdifax_pending_signoffs(events)` returns, in feed order, the run ids whose allowing policy rule requires a person's sign-off (their `run.sealed` event says `signoff_required`) and on which no approval is in force: the last sign-off on the record, if any, is not an approval. Pass the feed from its start, or pages that include each run's sign-offs. It makes no request.
+`verdifax_pending_signoffs(events)` returns, in feed order, the run ids whose allowing policy rule requires a person's sign-off (their `run.sealed` event says `signoff_required`) and on which no approval is in force, read as `verdifax-verify` reads it: the latest sign-off on the run's whole job governs when there is one, and otherwise the latest sign-off on its record; a receipt sign-off does not count. Pass the feed from its start, or pages that include each run's sign-offs. It makes no request.
 
 A webhook posts each new event to an `https://` address, signed under the Standard Webhooks scheme. A delivery is a copy: the pull feed and the public log are the record. Check each delivery on the raw body bytes, before any JSON parsing:
 
