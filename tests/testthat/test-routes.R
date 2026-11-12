@@ -153,6 +153,65 @@ test_that("reports carry the answer when given, and the public report goes by to
   expect_error(verdifax_download_public_audit_pdf(client, ""), "token")
 })
 
+test_that("a report format fallback is the caller's choice", {
+  pdf_reply <- function(req) {
+    if (grepl("format=breif", req$url, fixed = TRUE) && !grepl("fallback=", req$url, fixed = TRUE) &&
+        is.null(httr2::req_get_body(req))) {
+      return(reply("{\"error\":\"unknown report format: use brief, auditor, legal or comprehensive\"}", status = 400))
+    }
+    httr2::response(status_code = 200, headers = "Content-Type: application/pdf", body = charToRaw("%PDF-report"))
+  }
+  client <- test_client()
+  expect_error(
+    httr2::with_mocked_responses(pdf_reply, verdifax_download_audit_pdf(client, 7, "breif")),
+    "brief, auditor, legal or comprehensive"
+  )
+  sent <- capture({
+    verdifax_download_audit_pdf(client, 7, "breif", fallback = "comprehensive")
+    verdifax_download_public_audit_pdf(client, "tok", "breif", fallback = "comprehensive")
+    verdifax_download_public_audit_pdf(client, "tok", "breif", ai_output_text = "the answer", fallback = "comprehensive")
+  }, pdf_reply)
+  expect_length(sent, 3)
+  expect_equal(sent[[1]]$url$query, list(format = "breif", fallback = "comprehensive"))
+  expect_match(sent[[2]]$raw_url, "/public/runs/tok/report.pdf?format=breif&fallback=comprehensive", fixed = TRUE)
+  expect_equal(sent[[3]]$method, "POST")
+  expect_equal(sent[[3]]$body, list(format = "breif", fallback = "comprehensive", ai_output_text = "the answer"))
+  expect_error(verdifax_download_audit_pdf(client, 7, "breif", fallback = c("a", "b")), "fallback")
+})
+
+test_that("lists and searches send lenient=1 only when asked", {
+  client <- test_client()
+  ok <- function(req) reply("{\"ok\":true,\"runs\":[],\"total\":0,\"attestations\":[]}")
+  sent <- capture({
+    verdifax_list_runs(client, lenient = TRUE)
+    verdifax_list_account_runs(client, limit = 5, lenient = TRUE)
+    verdifax_search_runs(client, from = "2026-11-11", lenient = TRUE)
+    verdifax_list_attestations(client, lenient = TRUE)
+    verdifax_list_runs(client, limit = 5)
+  }, ok)
+  expect_length(sent, 5)
+  expect_equal(sent[[1]]$url$query, list(lenient = "1"))
+  expect_equal(sent[[2]]$url$query, list(limit = "5", lenient = "1"))
+  expect_equal(sent[[3]]$url$query, list(from = "2026-11-11", lenient = "1"))
+  expect_equal(sent[[4]]$url$query, list(lenient = "1"))
+  expect_equal(sent[[5]]$url$query, list(limit = "5"))
+})
+
+test_that("the public sign-off routes need no key", {
+  client <- verdifax_client(base_url = "https://api.example.test", api_key = NULL)
+  answer <- "{\"ok\":true,\"run_id\":7,\"read\":true,\"signoffs\":[],\"decision_in_force\":{\"decision\":\"approve\",\"run_id\":9,\"on\":\"job_final_step\"}}"
+  sent <- capture({
+    out <- verdifax_get_public_signoff_by_token(client, "a b/c")
+    verdifax_get_public_signoff(client, 7)
+  }, function(req) reply(answer))
+  expect_equal(out$decision_in_force$run_id, 9)
+  expect_match(sent[[1]]$raw_url, "/public/runs/a%20b%2Fc/signoff.json", fixed = TRUE)
+  expect_equal(sent[[2]]$url$path, "/runs/7/signoff.json")
+  expect_null(sent[[1]]$headers[["X-Verdifax-Key"]])
+  expect_error(verdifax_get_public_signoff_by_token(client, ""), "token")
+  expect_error(verdifax_get_public_signoff(client, 0), "run_id")
+})
+
 test_that("verdifax_dcae_verify posts the bundle", {
   bundle <- list(envelope_id = "e", manifest_hash = strrep("a", 64))
   sent <- capture(
@@ -406,10 +465,10 @@ test_that("GET, HEAD and OPTIONS carry the retry policy and POST does not", {
   expect_null(verdifax:::.build_request(off, "/x", NULL, method = "GET")$policies$retry_max_tries)
 })
 
-test_that("the default user agent names version 1.11.0", {
+test_that("the default user agent names version 1.12.0", {
   client <- verdifax_client(base_url = "http://mock.invalid")
   req <- verdifax:::.build_request(client, "/x", NULL, method = "GET")
-  expect_equal(httr2::req_get_headers(req)[["User-Agent"]], "verdifax-r/1.11.0")
+  expect_equal(httr2::req_get_headers(req)[["User-Agent"]], "verdifax-r/1.12.0")
 })
 
 test_that("user_agent reaches the request", {

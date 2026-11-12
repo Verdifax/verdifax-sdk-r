@@ -439,7 +439,12 @@ verdifax_capture_environment <- function(declared_seeds = list(),
 #'   number, not negative), `object_type` (`"text"`, `"transaction"`,
 #'   `"code"`, `"data"`, `"model"` or `"file"`), `object_id` (text of at
 #'   most 256 bytes) and `classification` (`"PUBLIC"`, `"INTERNAL"`,
-#'   `"CONFIDENTIAL"`, `"RESTRICTED"`, `"TOP_SECRET"` or `"TS_SCI"`). An
+#'   `"CONFIDENTIAL"`, `"RESTRICTED"`, `"TOP_SECRET"` or `"TS_SCI"`), and
+#'   `data_quality`, your declaration about the data the decision used: a
+#'   named list of `source` (at most 200 bytes), `as_of` (a time such as
+#'   `"2026-11-11T09:00:00Z"`) and `checks`, an unnamed list of up to 50
+#'   checks, each `list(name = , result = )` with a distinct name and a
+#'   result of `"pass"`, `"fail"` or `"warn"`. Verdifax judges none of it. An
 #'   unknown field or a value outside these is refused before sending, so a
 #'   misspelt field is never dropped. `actor_type`, `mfa_satisfied` and
 #'   `session_age_seconds` describe the attested actor, so a set

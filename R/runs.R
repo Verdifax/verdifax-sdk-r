@@ -110,14 +110,16 @@ verdifax_get_run <- function(client, run_id) {
 #' @param client A client handle from `verdifax_client()`.
 #' @param limit Optional page size. The server caps it at 500.
 #' @param offset Optional number of rows to skip.
+#' @param lenient `TRUE` asks the server to ignore or replace a value it
+#'   cannot read instead of refusing the request with HTTP 400.
 #'
 #' @return Parsed API response list with `total`, `limit`, `offset`
 #'   and `runs`. Each run holds `api_key_id`, the id of the key that
 #'   requested it.
 #'
 #' @export
-verdifax_list_runs <- function(client, limit = NULL, offset = NULL) {
-  .perform(.get(client, "/runs", .query(limit = limit, offset = offset)))
+verdifax_list_runs <- function(client, limit = NULL, offset = NULL, lenient = FALSE) {
+  .perform(.get(client, "/runs", .query(limit = limit, offset = offset, lenient = if (isTRUE(lenient)) "1" else NULL)))
 }
 
 #' Search this key's runs.
@@ -128,9 +130,9 @@ verdifax_list_runs <- function(client, limit = NULL, offset = NULL) {
 #' @param program_id Optional program ID.
 #' @param route_id Optional route identifier.
 #' @param status Optional run status, for example `"ok"`.
-#' @param from,to Optional RFC 3339 times. The server ignores one it
-#'   cannot parse here, unlike `verdifax_export_runs()`, which refuses
-#'   it.
+#' @param from,to Optional RFC 3339 times. One the server cannot read is
+#'   refused with HTTP 400 unless `lenient = TRUE`, which asks the server
+#'   to leave it out instead.
 #'
 #' @return Parsed API response list with `total`, `limit`, `offset`
 #'   and `runs`.
@@ -144,7 +146,8 @@ verdifax_search_runs <- function(client,
                                  from = NULL,
                                  to = NULL,
                                  limit = NULL,
-                                 offset = NULL) {
+                                 offset = NULL,
+                                 lenient = FALSE) {
   query <- .query(
     manifest_hash = manifest_hash,
     program_id = program_id,
@@ -153,7 +156,8 @@ verdifax_search_runs <- function(client,
     from = from,
     to = to,
     limit = limit,
-    offset = offset
+    offset = offset,
+    lenient = if (isTRUE(lenient)) "1" else NULL
   )
   .perform(.get(client, "/runs/search", query))
 }

@@ -194,14 +194,16 @@ verdifax_clear_account_request_key <- function(client) {
 #' @inheritParams verdifax_get_account
 #' @param limit Optional page size. The server caps it at 500.
 #' @param offset Optional number of rows to skip.
+#' @param lenient `TRUE` asks the server to ignore or replace a value it
+#'   cannot read instead of refusing the request with HTTP 400.
 #'
 #' @return Parsed API response list with `total`, `limit`, `offset` and
 #'   `runs`, as from `verdifax_list_runs()`. Each run holds `api_key_id`,
 #'   the id of the account's key that requested it.
 #'
 #' @export
-verdifax_list_account_runs <- function(client, limit = NULL, offset = NULL) {
-  .perform(.get(client, .ACCOUNT_RUNS_PATH, .query(limit = limit, offset = offset)))
+verdifax_list_account_runs <- function(client, limit = NULL, offset = NULL, lenient = FALSE) {
+  .perform(.get(client, .ACCOUNT_RUNS_PATH, .query(limit = limit, offset = offset, lenient = if (isTRUE(lenient)) "1" else NULL)))
 }
 
 #' Export the runs the server holds for every key in the account in a period.

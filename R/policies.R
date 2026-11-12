@@ -8,7 +8,26 @@
 
 .POLICY_CONTEXT_FIELDS <- c(
   "actor_type", "mfa_satisfied", "session_age_seconds",
-  "object_type", "object_id", "classification"
+  "object_type", "object_id", "classification", "data_quality"
+)
+.DATA_QUALITY_FIELDS <- c("source", "as_of", "checks")
+.DATA_CHECK_FIELDS <- c("name", "result")
+.DATA_CHECK_RESULTS <- c("pass", "fail", "warn")
+.DATA_SOURCE_MAX_BYTES <- 200L
+.DATA_CHECKS_MAX <- 50L
+.DATA_CHECK_NAME_MAX_BYTES <- 100L
+# The one form an as_of time may take, in ASCII digits, as the server checks
+# it (tests/testthat/sdk-data-quality-vector.json). \z, not $, ends it: in a
+# perl = TRUE pattern $ also matches before a final newline.
+.AS_OF_SHAPE <- paste0(
+  "^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})",
+  "(\\.[0-9]{1,9})?(Z|[+-]([0-9]{2}):([0-9]{2}))\\z"
+)
+# The code points Go's strings.TrimSpace removes, which the server uses to
+# find a blank check name. U+FEFF and U+001C to U+001F are not among them.
+.GO_SPACES <- c(
+  0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0x85, 0xA0, 0x1680, 0x2000:0x200A,
+  0x2028, 0x2029, 0x202F, 0x205F, 0x3000
 )
 .POLICY_ACTOR_TYPES <- c("agent", "user", "service", "system")
 .POLICY_OBJECT_TYPES <- c("text", "transaction", "code", "data", "model", "file")
@@ -69,6 +88,128 @@
   text
 }
 
+# Whether `value` is an as_of time the server accepts: the form above, a real
+# calendar date and time, and an offset of at most 23:59.
+.valid_as_of <- function(value) {
+  shape <- regmatches(value, regexec(.AS_OF_SHAPE, value, perl = TRUE))[[1]]
+  if (length(shape) == 0) {
+    return(FALSE)
+  }
+  part <- as.integer(shape[2:7])
+  year <- part[1]
+  leap <- year %% 4 == 0 && (year %% 100 != 0 || year %% 400 == 0)
+  month_days <- c(31, if (leap) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+  if (part[2] < 1 || part[2] > 12 || part[3] < 1 || part[3] > month_days[part[2]]) {
+    return(FALSE)
+  }
+  if (part[4] > 23 || part[5] > 59 || part[6] > 59) {
+    return(FALSE)
+  }
+  if (nzchar(shape[10]) && (as.integer(shape[10]) > 23 || as.integer(shape[11]) > 59)) {
+    return(FALSE)
+  }
+  TRUE
+}
+
+.data_text <- function(value, what) {
+  if (!is.character(value) || length(value) != 1 || is.na(value)) {
+    stop("policy_context$data_quality$", what, " must be a single string", call. = FALSE)
+  }
+  text <- enc2utf8(as.vector(value))
+  if (!validUTF8(text)) {
+    stop("policy_context$data_quality$", what, " is not valid UTF-8", call. = FALSE)
+  }
+  text
+}
+
+.named_fields <- function(value, known, what) {
+  if (!is.list(value) || (length(value) > 0 &&
+      (is.null(names(value)) || any(!nzchar(names(value)))))) {
+    stop(what, " must be a named list", call. = FALSE)
+  }
+  unknown <- setdiff(names(value), known)
+  if (length(unknown) > 0) {
+    stop(what, " has an unknown field: ", paste(unknown, collapse = ", "), call. = FALSE)
+  }
+  if (anyDuplicated(names(value)) > 0) {
+    stop(what, " names a field twice", call. = FALSE)
+  }
+  value[!vapply(value, is.null, logical(1))]
+}
+
+# A data_quality declaration, checked the way the server checks it: where
+# the data came from, the time it describes and the checks run on it.
+.policy_data_quality <- function(value) {
+  value <- .named_fields(value, .DATA_QUALITY_FIELDS, "policy_context$data_quality")
+  block <- list()
+  if (!is.null(value$source)) {
+    source <- .data_text(value$source, "source")
+    if (nchar(source, type = "bytes") > .DATA_SOURCE_MAX_BYTES) {
+      stop(
+        "policy_context$data_quality$source is longer than ", .DATA_SOURCE_MAX_BYTES, " bytes",
+        call. = FALSE
+      )
+    }
+    block$source <- source
+  }
+  if (!is.null(value$as_of)) {
+    as_of <- .data_text(value$as_of, "as_of")
+    if (nzchar(as_of) && !.valid_as_of(as_of)) {
+      stop(
+        "policy_context$data_quality$as_of must be a time of the form ",
+        "2026-11-11T09:00:00Z or 2026-11-11T09:00:00+05:30",
+        call. = FALSE
+      )
+    }
+    block$as_of <- as_of
+  }
+  if (!is.null(value$checks)) {
+    checks <- value$checks
+    if (!is.list(checks) || !is.null(names(checks))) {
+      stop(
+        "policy_context$data_quality$checks must be an unnamed list of checks",
+        call. = FALSE
+      )
+    }
+    if (length(checks) > .DATA_CHECKS_MAX) {
+      stop(
+        "policy_context$data_quality names more than ", .DATA_CHECKS_MAX, " checks",
+        call. = FALSE
+      )
+    }
+    seen <- character(0)
+    block$checks <- lapply(checks, function(check) {
+      check <- .named_fields(check, .DATA_CHECK_FIELDS, "each policy_context$data_quality check")
+      name <- check$name
+      named <- is.character(name) && length(name) == 1 && !is.na(name) &&
+        validUTF8(enc2utf8(name))
+      if (named) {
+        name <- enc2utf8(as.vector(name))
+        named <- !all(utf8ToInt(name) %in% .GO_SPACES) &&
+          nchar(name, type = "bytes") <= .DATA_CHECK_NAME_MAX_BYTES && !name %in% seen
+      }
+      if (!named) {
+        stop(
+          "each policy_context$data_quality check needs a distinct name of at most ",
+          .DATA_CHECK_NAME_MAX_BYTES, " bytes",
+          call. = FALSE
+        )
+      }
+      seen <<- c(seen, name)
+      result <- check$result
+      if (!is.character(result) || length(result) != 1 || is.na(result) ||
+          !result %in% .DATA_CHECK_RESULTS) {
+        stop(
+          "policy_context$data_quality check ", name, " has a result that is not pass, fail or warn",
+          call. = FALSE
+        )
+      }
+      list(name = name, result = as.vector(result))
+    })
+  }
+  block
+}
+
 # A value in actor_type, mfa_satisfied or session_age_seconds describes the
 # attested actor. Without one the server refuses it, because the rules would
 # read the zero value instead. FALSE and 0 are the zero values, so they pass.
@@ -110,7 +251,8 @@
       classification = .policy_choice(value, name, .POLICY_CLASSIFICATIONS),
       mfa_satisfied = .policy_flag(value, name),
       session_age_seconds = .policy_session_age(value),
-      object_id = .policy_object_id(value)
+      object_id = .policy_object_id(value),
+      data_quality = .policy_data_quality(value)
     )
   }
   if (.has_actor_values(block) && !isTRUE(attested)) {

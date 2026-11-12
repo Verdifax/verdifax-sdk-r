@@ -123,7 +123,12 @@ activation_verifies <- function(signature, chain_id, document_hash, previous,
   session_age_seconds = 120,
   object_type = "transaction",
   object_id = "loan-42",
-  classification = "CONFIDENTIAL"
+  classification = "CONFIDENTIAL",
+  data_quality = list(
+    source = "core-banking",
+    as_of = "2026-11-11T09:00:00Z",
+    checks = list(list(name = "complete", result = "pass"), list(name = "drift", result = "warn"))
+  )
 )
 
 run_attest <- function(client, ..., attested_context = .actor) {
@@ -525,6 +530,28 @@ test_that("a bad policy_context or expected_policy_hash is refused without a req
     list(list(object_id = strrep("a", 257)), "longer than 256 bytes"),
     list(list(object_id = strrep("é", 129)), "longer than 256 bytes"),
     list(list(object_id = 42), "object_id must be a single string"),
+    list(list(data_quality = "fresh"), "data_quality must be a named list"),
+    list(list(data_quality = list(asOf = "2026-11-11T09:00:00Z")), "unknown field: asOf"),
+    list(list(data_quality = list(source = strrep("s", 201))), "longer than 200 bytes"),
+    list(list(data_quality = list(source = strrep("é", 101))), "longer than 200 bytes"),
+    list(list(data_quality = list(source = 7)), "source must be a single string"),
+    list(list(data_quality = list(as_of = "2026-11-11")), "as_of must be a time"),
+    list(list(data_quality = list(as_of = 1762851600)), "as_of must be a single string"),
+    list(list(data_quality = list(checks = list(name = "x", result = "pass"))), "unnamed list"),
+    list(list(data_quality = list(checks = "complete")), "unnamed list"),
+    list(
+      list(data_quality = list(checks = lapply(1:51, function(i) list(name = paste0("c", i), result = "pass")))),
+      "more than 50 checks"
+    ),
+    list(list(data_quality = list(checks = list("complete"))), "check must be a named list"),
+    list(list(data_quality = list(checks = list(list(name = "x", result = "pass", why = "y")))), "unknown field: why"),
+    list(list(data_quality = list(checks = list(list(name = " ", result = "pass")))), "distinct name"),
+    list(list(data_quality = list(checks = list(list(result = "pass")))), "distinct name"),
+    list(
+      list(data_quality = list(checks = list(list(name = "x", result = "pass"), list(name = "x", result = "fail")))),
+      "distinct name"
+    ),
+    list(list(data_quality = list(checks = list(list(name = "x", result = "ok")))), "not pass, fail or warn"),
     list(c(actor_type = "user"), "named list"),
     list(list("user"), "named list"),
     list("user", "named list")
@@ -768,4 +795,37 @@ test_that("a misspelt argument to attest or the determinism check is refused by 
     expect_error(run_determinism(client, expected_policy_hsh = .policy_hash), "expected_policy_hsh")
   })
   expect_length(sent, 0)
+})
+
+
+# ── data_quality values, held to the server's by one shared file ────────────
+
+test_that("as_of times and check names are accepted and refused exactly as the shared vector lists", {
+  vector <- jsonlite::fromJSON(testthat::test_path("sdk-data-quality-vector.json"), simplifyVector = FALSE)
+  accepted <- function(data_quality) {
+    tryCatch({
+      verdifax:::.policy_context_block(list(data_quality = data_quality))
+      TRUE
+    }, error = function(e) FALSE)
+  }
+  for (list_name in c("as_of", "check_name")) {
+    expect_gt(length(vector[[list_name]]$accept), 0)
+    expect_gt(length(vector[[list_name]]$refuse), 0)
+  }
+  for (as_of in vector$as_of$accept) expect_true(accepted(list(as_of = as_of)), info = as_of)
+  for (as_of in vector$as_of$refuse) expect_false(accepted(list(as_of = as_of)), info = as_of)
+  check <- function(name) list(checks = list(list(name = name, result = "pass")))
+  for (name in vector$check_name$accept) expect_true(accepted(check(name)), info = name)
+  for (name in vector$check_name$refuse) expect_false(accepted(check(name)), info = name)
+})
+
+test_that("a data_quality declaration is sent as JSON objects and lists", {
+  sent <- capture(run_attest(unsigned_client(), policy_context = list(data_quality = list(
+    as_of = I("2026-11-11T09:00:00Z"), checks = list(list(name = c(n = "complete"), result = I("pass")))
+  )), attested_context = NULL))
+  expect_match(
+    sent[[1]]$json,
+    "\"policy_context\":{\"data_quality\":{\"as_of\":\"2026-11-11T09:00:00Z\",\"checks\":[{\"name\":\"complete\",\"result\":\"pass\"}]}}",
+    fixed = TRUE
+  )
 })

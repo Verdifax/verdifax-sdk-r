@@ -1,3 +1,14 @@
+# verdifax 1.12.0
+
+## Data-quality declarations, pending sign-offs, public sign-offs, and requests read strictly
+
+* `policy_context` takes `data_quality`: where the data came from (`source`), the time it describes (`as_of`, read as strictly as the server reads it) and the checks you ran on it (`checks`, each a `name` and a `result` of `"pass"`, `"fail"` or `"warn"`). It is sealed with the other policy values, and a policy's `data_quality` condition can require and test it. Verdifax judges none of it. The SDK checks it before sending, with the shared data-quality vector every SDK and the server test.
+* `verdifax_pending_signoffs(events)` lists, in feed order, the runs whose allowing rule requires a person's sign-off and on which no approval is in force. It makes no request.
+* `verdifax_get_public_signoff()` and `verdifax_get_public_signoff_by_token()` read the sign-off a published run's audit report prints, and for a step of a job, the job's decision in force. No API key needed.
+* `verdifax_download_audit_pdf()` and `verdifax_download_public_audit_pdf()` take `fallback`. The server now refuses a report format it does not know with HTTP 400; `fallback = "comprehensive"` asks for the comprehensive report instead.
+* `verdifax_list_runs()`, `verdifax_search_runs()`, `verdifax_list_account_runs()` and `verdifax_list_attestations()` take `lenient`. The server now refuses a value it cannot read, such as a date in a search, with HTTP 400; `lenient = TRUE` asks it to ignore or replace the value instead.
+* The user agent is `verdifax-r/1.12.0`.
+
 # verdifax 1.11.0
 
 ## Interrupted sign-offs and policy changes, exact records, and time limits

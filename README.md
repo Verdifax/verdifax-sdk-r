@@ -98,14 +98,14 @@ GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 42
 | `verdifax_verify_determinism()` | `POST /execute/verify-determinism` |
 | `verdifax_get_run()` | `GET /runs/{id}` |
 | `verdifax_verify_run()` | `GET /runs/{id}/verify` |
-| `verdifax_list_runs()` | `GET /runs` |
+| `verdifax_list_runs()` | `GET /runs`. A value the server cannot read stops with HTTP 400 unless `lenient = TRUE`; `verdifax_search_runs()`, `verdifax_list_account_runs()` and `verdifax_list_attestations()` take `lenient` too |
 | `verdifax_search_runs()` | `GET /runs/search` |
 | `verdifax_export_runs()` | `GET /runs/export` |
 | `verdifax_export_runs_csv()` | `GET /runs/export?format=csv` |
 | `verdifax_get_run_artifacts()` | `GET /runs/{id}/artifacts` |
 | `verdifax_get_run_report()` | `GET /runs/{id}/report` |
-| `verdifax_download_audit_pdf()` | `GET /runs/{id}/report.pdf`, or `POST` with `ai_output_text`, printed when its SHA-256 is the sealed hash |
-| `verdifax_download_public_audit_pdf()` | `GET` or `POST /public/runs/{token}/report.pdf`, no key |
+| `verdifax_download_audit_pdf()` | `GET /runs/{id}/report.pdf`, or `POST` with `ai_output_text`, printed when its SHA-256 is the sealed hash. An unknown `format` is refused (HTTP 400) unless `fallback = "comprehensive"` |
+| `verdifax_download_public_audit_pdf()` | `GET` or `POST /public/runs/{token}/report.pdf`, no key; takes `fallback` too |
 | `verdifax_get_allow_token()` | `GET /runs/{id}/allow-token` |
 | `verdifax_get_deny_receipt()` | `GET /runs/{id}/deny-receipt` |
 | `verdifax_get_ccv_halt_receipt()` | `GET /runs/{id}/ccv-halt-receipt` |
@@ -118,6 +118,8 @@ GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 42
 | `verdifax_get_attestation()` | `GET /attestations/{id}` |
 | `verdifax_get_public_bundle()` | `GET /runs/{id}/bundle.json` |
 | `verdifax_get_public_bundle_by_token()` | `GET /public/runs/{token}/bundle.json` |
+| `verdifax_get_public_signoff()` | `GET /runs/{id}/signoff.json`: the sign-off a published run's audit report prints, and its job's decision in force |
+| `verdifax_get_public_signoff_by_token()` | `GET /public/runs/{token}/signoff.json` |
 | `verdifax_dcae_verify()` | `POST /dcae/verify` |
 | `verdifax_register_request_key()` | `POST /keys/request-key` |
 | `verdifax_rotate_request_key()` | `POST /keys/request-key` |
@@ -298,7 +300,9 @@ The document is sent as the exact string you give, because the server hashes its
 
 `verdifax_activate_policy()` reads `GET /policies` for the chain and its newest change, then asks for the change naming that newest change. Once a request key is registered, the server needs that key to approve a change, so call it with a client that holds the key. An HTTP 409 means the change could not be made as asked, for example because someone changed the policy first or the document is not yet effective: the call stops with the server's message and is not retried. `verdifax_policy_activation_approval()` and `verdifax_policy_activation_preimage()` build the approval and its bytes without sending anything.
 
-`policy_context` is what a run declares for the rules to read: `actor_type`, `mfa_satisfied`, `session_age_seconds`, `object_type`, `object_id` and `classification`, all optional. `verdifax_attest()`, `verdifax_execute()`, `verdifax_verify_determinism()`, `verdifax_job_step()`, the provider helpers and each batch row accept it. An unknown field or a value outside the listed ones is refused before sending, so a misspelt field is never dropped. `actor_type`, `mfa_satisfied` and `session_age_seconds` describe the attested actor, so a set `actor_type`, `mfa_satisfied = TRUE` or a non-zero `session_age_seconds` needs an `attested_context` with at least one field set, such as `actor_id`, and is refused before sending otherwise. `mfa_satisfied = FALSE` and `session_age_seconds = 0` need none. The provider helpers send an `attested_context` with `actor_role` and `model_provider`, so they can carry any `policy_context` field. `expected_policy_hash` makes the server refuse the run with HTTP 409 when another policy is active. Both go inside `signed_request` on a signed client.
+`policy_context` is what a run declares for the rules to read: `actor_type`, `mfa_satisfied`, `session_age_seconds`, `object_type`, `object_id`, `classification` and `data_quality`, all optional. `verdifax_attest()`, `verdifax_execute()`, `verdifax_verify_determinism()`, `verdifax_job_step()`, the provider helpers and each batch row accept it. An unknown field or a value outside the listed ones is refused before sending, so a misspelt field is never dropped. `actor_type`, `mfa_satisfied` and `session_age_seconds` describe the attested actor, so a set `actor_type`, `mfa_satisfied = TRUE` or a non-zero `session_age_seconds` needs an `attested_context` with at least one field set, such as `actor_id`, and is refused before sending otherwise. `mfa_satisfied = FALSE` and `session_age_seconds = 0` need none. The provider helpers send an `attested_context` with `actor_role` and `model_provider`, so they can carry any `policy_context` field. `expected_policy_hash` makes the server refuse the run with HTTP 409 when another policy is active. Both go inside `signed_request` on a signed client.
+
+`data_quality` is your declaration about the data the decision used: a named list of `source` (at most 200 bytes), `as_of` (a time such as `"2026-11-11T09:00:00Z"` or `"2026-11-11T09:00:00+05:30"`) and `checks`, an unnamed list of up to 50 checks, each `list(name = , result = )` with a distinct name of at most 100 bytes and a result of `"pass"`, `"fail"` or `"warn"`. It needs no attested actor. It is sealed with the other values, a policy's `data_quality` condition can require and test it, and Verdifax judges none of it. A declaration the server would refuse is refused before sending.
 
 A policy judges what you declared. It cannot show the declared facts are true.
 
@@ -460,6 +464,8 @@ verdifax_follow_signals(feed, function(event) {
 ```
 
 `verdifax_follow_signals()` reads each page from the `next_after` of the one before, so no event is skipped. When a read fails, it stops with an error of class `verdifax_follow_error` whose `after` is the last sequence handled: call it again with that `after` to go on. `verdifax_get_signals()` reads one page with `after`, `limit` (1 to 500) and `wait` (0 to 25 seconds). Its HTTP timeout is at least the wait plus 30 seconds. `verdifax_signal_event_hash()` recomputes an event's `event_hash`, and `verdifax-verify --signals` checks a saved feed.
+
+`verdifax_pending_signoffs(events)` returns, in feed order, the run ids whose allowing policy rule requires a person's sign-off (their `run.sealed` event says `signoff_required`) and on which no approval is in force: the last sign-off on the record, if any, is not an approval. Pass the feed from its start, or pages that include each run's sign-offs. It makes no request.
 
 A webhook posts each new event to an `https://` address, signed under the Standard Webhooks scheme. A delivery is a copy: the pull feed and the public log are the record. Check each delivery on the raw body bytes, before any JSON parsing:
 

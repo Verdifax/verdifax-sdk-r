@@ -179,8 +179,8 @@ verdifax_dcae_verify <- function(client, bundle) {
 #'   `attestations`.
 #'
 #' @export
-verdifax_list_attestations <- function(client, limit = NULL, offset = NULL) {
-  .perform(.get(client, "/attestations", .query(limit = limit, offset = offset)))
+verdifax_list_attestations <- function(client, limit = NULL, offset = NULL, lenient = FALSE) {
+  .perform(.get(client, "/attestations", .query(limit = limit, offset = offset, lenient = if (isTRUE(lenient)) "1" else NULL)))
 }
 
 #' Fetch one attestation receipt.
@@ -297,12 +297,16 @@ verdifax_get_run_report <- function(client, run_id) {
 #' @param format One of `"brief"`, `"auditor"`, `"legal"` or
 #'   `"comprehensive"`.
 #' @param ai_output_text The AI's exact answer, or `NULL`.
+#' @param fallback `NULL`, or `"comprehensive"` to receive the comprehensive
+#'   report when `format` is not one of the four names. Without it, a format
+#'   the server does not know is refused with HTTP 400 and the four names.
 #'
 #' @return A raw vector of the PDF bytes. Save it with `writeBin()`.
 #'
 #' @export
-verdifax_download_audit_pdf <- function(client, run_id, format = "comprehensive", ai_output_text = NULL) {
-  .report_pdf(client, .run_path(run_id, "/report.pdf"), NULL, format, ai_output_text)
+verdifax_download_audit_pdf <- function(client, run_id, format = "comprehensive", ai_output_text = NULL,
+                                        fallback = NULL) {
+  .report_pdf(client, .run_path(run_id, "/report.pdf"), NULL, format, ai_output_text, fallback)
 }
 
 #' The audit PDF of a published record a share token points to.
@@ -316,29 +320,40 @@ verdifax_download_audit_pdf <- function(client, run_id, format = "comprehensive"
 #' @return A raw vector of the PDF bytes. Save it with `writeBin()`.
 #'
 #' @export
-verdifax_download_public_audit_pdf <- function(client, token, format = "comprehensive", ai_output_text = NULL) {
+verdifax_download_public_audit_pdf <- function(client, token, format = "comprehensive", ai_output_text = NULL,
+                                               fallback = NULL) {
   if (!is.character(token) || length(token) != 1 || is.na(token) || !nzchar(token)) {
     stop("token is required", call. = FALSE)
   }
   # req_url_path() would escape the escaped token a second time.
   url <- paste0(client$base_url, "/public/runs/", utils::URLencode(token, reserved = TRUE), "/report.pdf")
-  .report_pdf(client, "/public/runs", url, format, ai_output_text)
+  .report_pdf(client, "/public/runs", url, format, ai_output_text, fallback)
 }
 
-# A GET with the format, or, with the answer, a POST carrying both.
-.report_pdf <- function(client, path, url, format, ai_output_text) {
+# A GET with the format and the fallback, or, with the answer, a POST
+# carrying all three.
+.report_pdf <- function(client, path, url, format, ai_output_text, fallback = NULL) {
+  if (!is.null(fallback) && (!is.character(fallback) || length(fallback) != 1 || is.na(fallback))) {
+    stop("fallback must be NULL or \"comprehensive\"", call. = FALSE)
+  }
   if (is.null(ai_output_text)) {
-    req <- .build_request(client, path, NULL, method = "GET", query = .query(format = format))
+    req <- .build_request(client, path, NULL, method = "GET", query = .query(format = format, fallback = fallback))
   } else {
     if (!is.character(ai_output_text) || length(ai_output_text) != 1 || is.na(ai_output_text) ||
         !nzchar(ai_output_text)) {
       stop("ai_output_text must be the AI's exact answer, a single non-empty string", call. = FALSE)
     }
-    body <- list(format = format, ai_output_text = enc2utf8(ai_output_text))
+    body <- list(format = format)
+    if (!is.null(fallback)) body$fallback <- fallback
+    body$ai_output_text <- enc2utf8(ai_output_text)
     req <- .build_request(client, path, body, method = "POST")
   }
   if (!is.null(url)) {
-    query <- if (is.null(ai_output_text)) paste0("?format=", utils::URLencode(format, reserved = TRUE)) else ""
+    query <- ""
+    if (is.null(ai_output_text)) {
+      query <- paste0("?format=", utils::URLencode(format, reserved = TRUE))
+      if (!is.null(fallback)) query <- paste0(query, "&fallback=", utils::URLencode(fallback, reserved = TRUE))
+    }
     req <- httr2::req_url(req, paste0(url, query))
   }
   req <- httr2::req_error(req, body = .error_detail)
@@ -415,6 +430,43 @@ verdifax_get_public_receipt_by_token <- function(client, token) {
   req <- .get(client, "/public/runs")
   req <- httr2::req_url(req, paste0(client$base_url, "/public/runs/", escaped, "/receipt.json"))
   httr2::resp_body_string(httr2::req_perform(req))
+}
+
+#' The sign-off of a published run a share token points to.
+#'
+#' The facts the run's public audit report prints: `decision_in_force`, and
+#' for a step of a job, `job`, the job's decision on its final step, which
+#' decides for every step. Needs no API key. The note, the approver key and
+#' the signatures are not served; `verdifax-verify --signoff` checks them
+#' from the account's sign-off records.
+#'
+#' @inheritParams verdifax_get_public_receipt_by_token
+#'
+#' @return Parsed API response list.
+#'
+#' @export
+verdifax_get_public_signoff_by_token <- function(client, token) {
+  if (!is.character(token) || length(token) != 1 || is.na(token) || !nzchar(token)) {
+    stop("token is required", call. = FALSE)
+  }
+  # req_url_path() would escape the escaped token a second time.
+  escaped <- utils::URLencode(token, reserved = TRUE)
+  req <- .get(client, "/public/runs")
+  .perform(httr2::req_url(req, paste0(client$base_url, "/public/runs/", escaped, "/signoff.json")))
+}
+
+#' The sign-off of a run made public before share tokens, by its number.
+#'
+#' As [verdifax_get_public_signoff_by_token()]. Needs no API key.
+#'
+#' @inheritParams verdifax_health
+#' @param run_id The run's number.
+#'
+#' @return Parsed API response list.
+#'
+#' @export
+verdifax_get_public_signoff <- function(client, run_id) {
+  .perform(.get(client, .run_path(run_id, "/signoff.json")))
 }
 
 #' The CRES deletion receipts bound to a run.

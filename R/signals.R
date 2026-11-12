@@ -616,3 +616,46 @@ verdifax_signal_event_hash <- function(kind, entry_hash, account, sequence, prev
 verdifax_get_failure_receipt <- function(client, run_id) {
   .get_body_text(client, paste0("/runs/", .require_id(run_id, "run_id"), "/failure-receipt"))
 }
+
+# ── Sign-offs a rule requires ───────────────────────────────────────────────
+
+#' List the runs still waiting for a sign-off their rule requires.
+#'
+#' Round 58, B7. A policy rule can require a person's sign-off on the
+#' results it allows; each such run's `run.sealed` event says
+#' `signoff_required`. This returns, in feed order, those runs on whose
+#' record no approval is in force: the last sign-off recorded on the record,
+#' if any, is not an approval. Pass the account's feed from its start, or a
+#' page that includes each run's sign-offs, so a sign-off recorded later is
+#' seen.
+#'
+#' @param events A list of feed events, as `verdifax_get_signals()` returns
+#'   in its `events`.
+#'
+#' @return An integer vector of run ids.
+#'
+#' @export
+verdifax_pending_signoffs <- function(events) {
+  order <- integer(0)
+  latest <- list()
+  for (e in events) {
+    data <- e$data
+    entry <- data$entry
+    if (identical(data$kind, "run.sealed")) {
+      run <- entry$run_id
+      if (!is.numeric(run) || length(run) != 1) {
+        stop("verdifax: the run.sealed entry of event ", e$id, " names no run", call. = FALSE)
+      }
+      if (isTRUE(entry$signoff_required) && !(run %in% order)) {
+        order <- c(order, as.integer(run))
+      }
+    } else if (identical(data$kind, "signoff.recorded")) {
+      target <- entry$target
+      if (identical(target$kind, "record") && is.numeric(target$run_id)) {
+        latest[[as.character(target$run_id)]] <- entry$decision
+      }
+    }
+  }
+  keep <- vapply(order, function(run) !identical(latest[[as.character(run)]], "approve"), logical(1))
+  order[keep]
+}

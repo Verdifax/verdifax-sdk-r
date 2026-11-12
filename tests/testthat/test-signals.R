@@ -867,3 +867,20 @@ test_that("every signal route and helper in sdk-parity.json has its R function",
   }
   expect_match(parity$notes$signal_feed, "follow_signals")
 })
+
+test_that("verdifax_pending_signoffs lists required runs without an approval in force", {
+  ev <- function(seq, kind, entry) list(id = paste0("account-7/", seq), data = list(kind = kind, sequence = seq, entry = entry))
+  so <- function(run, decision, kind) list(decision = decision, target = list(kind = kind, run_id = run))
+  events <- list(
+    ev(1, "run.sealed", list(run_id = 10, signoff_required = TRUE)),
+    ev(2, "run.sealed", list(run_id = 11)),
+    ev(3, "run.sealed", list(run_id = 12, signoff_required = TRUE)),
+    ev(4, "run.sealed", list(run_id = 13, signoff_required = TRUE)),
+    ev(5, "signoff.recorded", so(10, "approve", "record")),
+    ev(6, "signoff.recorded", so(12, "approve", "record")),
+    ev(7, "signoff.recorded", so(12, "reject", "record")),
+    ev(8, "signoff.recorded", so(13, "approve", "receipt"))
+  )
+  expect_identical(verdifax_pending_signoffs(events), c(12L, 13L))
+  expect_error(verdifax_pending_signoffs(list(ev(1, "run.sealed", list()))), "names no run")
+})
