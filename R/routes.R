@@ -789,6 +789,34 @@ verdifax_policy_activation_preimage <- function(chain_id, document_hash, previou
   ))
 }
 
+#' The bytes the owner key's request key signs for a change the owner decides.
+#'
+#' `verdifax_set_account_setting()` and `verdifax_delete_run()` sign these
+#' bytes for you on a client with a `signing_key`. Use this to check an
+#' `owner_signature` in a sealed account change or run deletion.
+#'
+#' @param account The account's label, for example `"account-7"`.
+#' @param change The change's name: `"setting.owner_replacement"`,
+#'   `"setting.verdifax_deletion"` or `"run.deleted"`.
+#' @param subject What changes: the setting's value, `"allowed"` or
+#'   `"blocked"`, or for a deletion `"<run_id>:<record_hash>"`, with the run
+#'   id in decimal.
+#' @param signed_at The RFC 3339 UTC time in whole seconds.
+#' @param nonce The nonce as 32 lowercase hex characters.
+#'
+#' @return A raw vector: `verdifax.owner-change-signature.v1` and the
+#'   fields in this order, as UTF-8, joined by single zero bytes.
+#'
+#' @export
+verdifax_owner_change_preimage <- function(account, change, subject, signed_at, nonce) {
+  .check_preimage_field(account, "account")
+  .check_preimage_field(change, "change")
+  .check_preimage_field(subject, "subject")
+  .check_preimage_field(signed_at, "signed_at")
+  .check_preimage_field(nonce, "nonce")
+  .join_with_zero(list(.OWNER_CHANGE_FORM, account, change, subject, signed_at, nonce))
+}
+
 #' Build a policy activation approval without sending anything.
 #'
 #' `verdifax_activate_policy()` builds this for you on a client with a

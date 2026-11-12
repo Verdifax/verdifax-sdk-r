@@ -4,7 +4,9 @@
 #
 # The signal feed is every control signal Verdifax recorded for the account,
 # in order: a run refused, halted or failed, a policy change, a sign-off, an
-# approver key registered or revoked, a key created or revoked. Each event is
+# approver key registered or revoked, a key created or revoked, an account
+# change, a record deleted. A key change is verdifax.key-change.v2, which
+# names who decided it (decided_by), or v1, the owner's. Each event is
 # a CloudEvent that carries its place in the account's feed and the sealed
 # entry it points to. The feed cannot show a signal Verdifax never recorded.
 #
@@ -20,7 +22,8 @@
 .SIGNAL_KINDS <- c(
   "run.refused", "run.halted", "run.failed", "policy.changed", "signoff.recorded",
   "approver.registered", "approver.revoked", "key.created", "key.revoked",
-  "run.published", "run.unpublished", "chain.gap", "run.sealed", "chain.interrupted"
+  "run.published", "run.unpublished", "chain.gap", "run.sealed", "chain.interrupted",
+  "account.changed", "run.deleted"
 )
 .SIGNAL_PAGE_MAX <- 500L
 .SIGNAL_WAIT_MAX_SEC <- 25L
@@ -326,9 +329,10 @@ verdifax_revoke_feed_key <- function(client, id) {
 #'   `https://`.
 #' @param types Optional character vector of signal kinds, each one of
 #'   `run.refused`, `run.halted`, `run.failed`, `policy.changed`,
-#'   `signoff.recorded`, `approver.registered`, `approver.revoked`, `run.published`, `run.unpublished`,
-#'   `key.created` and `key.revoked`, with no repeats. `NULL` takes every
-#'   kind.
+#'   `signoff.recorded`, `approver.registered`, `approver.revoked`,
+#'   `key.created`, `key.revoked`, `run.published`, `run.unpublished`,
+#'   `chain.gap`, `run.sealed`, `chain.interrupted`, `account.changed` and
+#'   `run.deleted`, with no repeats. `NULL` takes every kind.
 #'
 #' @return Parsed API response list with `ok`, `id`, `url`, `types`,
 #'   `created_at`, `secret` (`whsec_` and base64) and `hint`. It holds the
@@ -627,9 +631,12 @@ verdifax_get_failure_receipt <- function(client, run_id) {
 #' record no approval is in force. The decision in force is read as
 #' `verdifax-verify` reads it: the last job sign-off on the run governs when
 #' there is one, and otherwise the last record sign-off; a receipt sign-off
-#' does not name a record (round 59, N15 and N19). Pass the account's feed
-#' from its start, or a page that includes each run's sign-offs, so a
-#' sign-off recorded later is seen.
+#' does not name a record (round 59, N15 and N19). A run whose record was
+#' deleted, by a `run.deleted` event for its `run_id` at any place in the
+#' events given, is left out, since there is no record left to sign off.
+#' Pass the account's feed from its start, or a page that includes each
+#' run's sign-offs and deletion, so a sign-off or deletion recorded later is
+#' seen.
 #'
 #' @param events A list of feed events, as `verdifax_get_signals()` returns
 #'   in its `events`.
@@ -641,6 +648,7 @@ verdifax_pending_signoffs <- function(events) {
   order <- integer(0)
   latest_job <- list()
   latest_record <- list()
+  deleted <- numeric(0)
   for (e in events) {
     data <- e$data
     entry <- data$entry
@@ -652,6 +660,12 @@ verdifax_pending_signoffs <- function(events) {
       if (isTRUE(entry$signoff_required) && !(run %in% order)) {
         order <- c(order, as.integer(run))
       }
+    } else if (identical(data$kind, "run.deleted")) {
+      run <- entry$run_id
+      if (!is.numeric(run) || length(run) != 1) {
+        stop("verdifax: the run.deleted entry of event ", e$id, " names no run", call. = FALSE)
+      }
+      deleted <- c(deleted, run)
     } else if (identical(data$kind, "signoff.recorded")) {
       target <- entry$target
       if (is.numeric(target$run_id)) {
@@ -667,6 +681,8 @@ verdifax_pending_signoffs <- function(events) {
     key <- as.character(run)
     if (!is.null(latest_job[[key]])) latest_job[[key]] else latest_record[[key]]
   }
-  keep <- vapply(order, function(run) !identical(in_force(run), "approve"), logical(1))
+  keep <- vapply(order, function(run) {
+    !(run %in% deleted) && !identical(in_force(run), "approve")
+  }, logical(1))
   order[keep]
 }

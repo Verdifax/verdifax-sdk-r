@@ -36,11 +36,13 @@
 .REQUEST_KEY_PROOF_FORM <- "verdifax.request-key.v1"
 .REQUEST_KEY_CHANGE_FORM <- "verdifax.request-key-change.v1"
 .POLICY_ACTIVATION_FORM <- "verdifax.policy-activation.v1"
+.OWNER_CHANGE_FORM <- "verdifax.owner-change-signature.v1"
 .JOB_FORM <- "verdifax.job.v1"
-# Every top-level field a run request may hold. The server ignores a field it
-# does not know, so a misspelt one would be dropped with no error: a batch
-# row with any other name is refused here instead. A test holds this list to
-# execute_fields in the shared sdk-parity.json.
+# Every top-level field a run request may hold. The server refuses a field it
+# does not know with HTTP 400, naming it, unless the request asks for
+# lenient=1, which drops it: a batch row with any other name is refused here
+# instead, before sending. A test holds this list to execute_fields in the
+# shared sdk-parity.json.
 .EXECUTE_FIELDS <- c(
   "payload", "payload_text", "program_id", "route_id", "registry_record_hash",
   "ai_output_text", "attested_context", "reproducibility_context",
@@ -78,7 +80,8 @@
 #'   `verdifax_execute_batch()`, `verdifax_verify_determinism()` and the
 #'   provider helpers sign their requests, and `verdifax_activate_policy()`
 #'   and `verdifax_activate_account_policy()` sign the change they ask
-#'   for. Needs the `sodium` package.
+#'   for, and `verdifax_set_account_setting()` and `verdifax_delete_run()`
+#'   sign the owner's change. Needs the `sodium` package.
 #'   The key is never sent to the server, and the returned list holds it
 #'   only inside a closure, so printing the client does not show it.
 #' @param user_agent Optional `User-Agent` value.
@@ -896,6 +899,16 @@ verdifax_clear_request_key <- function(client) {
   list(signature = .base64(signer$sign(preimage)), signed_at = signed_at, nonce = nonce)
 }
 
+# The owner's signature over one change: the `owner_signature` object of the
+# request body. verdifax_owner_change_preimage() in R/routes.R builds the
+# bytes it signs.
+.owner_signature <- function(signer, account, change, subject, signed_at = NULL, nonce = NULL) {
+  signed_at <- signed_at %||% .signing_time()
+  nonce <- nonce %||% .signing_nonce()
+  preimage <- verdifax_owner_change_preimage(account, change, subject, signed_at, nonce)
+  list(signature = .base64(signer$sign(preimage)), signed_at = signed_at, nonce = nonce)
+}
+
 
 # ── Internal: request body builder ──────────────────────────────────────────
 
@@ -962,7 +975,7 @@ verdifax_clear_request_key <- function(client) {
 
 # The attested flag follows the fields, in all four SDKs, so a policy
 # that reads the flag sees what the caller declared. An unknown field is
-# refused, because the server would drop it with no error.
+# refused here, before sending, as the server refuses it.
 .attested_block <- function(context) {
   if (!is.list(context) || (length(context) > 0 && is.null(names(context)))) {
     stop("attested_context must be a named list", call. = FALSE)

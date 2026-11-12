@@ -131,6 +131,8 @@ GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 42
 | `verdifax_get_policy_history()` | `GET /policies/history` |
 | `verdifax_activate_policy()` | `GET /policies`, then `POST /policies/{document_hash}/activate` |
 | `verdifax_get_account()` | `GET /account` |
+| `verdifax_set_account_setting()` | `GET /account` unless `account_id` is given, then `PUT /account/settings/{setting}`, signed by the owner's request key |
+| `verdifax_delete_run()` | `GET /account` unless `account_id` is given, then `POST /account/runs/{id}/delete`, signed by the owner's request key |
 | `verdifax_create_account_key()` | `POST /account/keys` |
 | `verdifax_list_account_keys()` | `GET /account/keys` |
 | `verdifax_revoke_account_key()` | `DELETE /account/keys/{id}` |
@@ -168,8 +170,10 @@ GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 42
 | `verdifax_admin_erase()` | `POST /admin/erase` |
 | `verdifax_admin_create_account()` | `POST /admin/accounts` |
 | `verdifax_admin_list_accounts()` | `GET /admin/accounts` |
+| `verdifax_admin_replace_owner_key()` | `POST /admin/accounts/{id}/owner-key/replace` |
+| `verdifax_admin_delete_run()` | `POST /admin/runs/{id}/delete` |
 
-These make no request: `verdifax_client()`, `verdifax_from_env()`, `verdifax_job()`, `verdifax_capture_environment()`, `verdifax_format_provider_payload()`, `verdifax_sign_request()`, `verdifax_request_key_registration_body()`, `verdifax_request_signature_preimage()`, `verdifax_policy_activation_preimage()`, `verdifax_policy_activation_approval()`, `verdifax_signoff_preimage()`, `verdifax_approver_key_proof()`, `verdifax_verify_webhook()`, `verdifax_signal_event_hash()`, `verdifax_generate_request_key()`, `verdifax_validate_hex64()`, `verdifax_validate_route_id()`, `verdifax_dse_dispatch_hash()`, `verdifax_dcae_closure_hash()`, `verdifax_cres_receipt_hash()` and `verdifax_run_statuses()`.
+These make no request: `verdifax_client()`, `verdifax_from_env()`, `verdifax_job()`, `verdifax_capture_environment()`, `verdifax_format_provider_payload()`, `verdifax_sign_request()`, `verdifax_request_key_registration_body()`, `verdifax_request_signature_preimage()`, `verdifax_policy_activation_preimage()`, `verdifax_policy_activation_approval()`, `verdifax_owner_change_preimage()`, `verdifax_signoff_preimage()`, `verdifax_approver_key_proof()`, `verdifax_verify_webhook()`, `verdifax_signal_event_hash()`, `verdifax_generate_request_key()`, `verdifax_validate_hex64()`, `verdifax_validate_route_id()`, `verdifax_dse_dispatch_hash()`, `verdifax_dcae_closure_hash()`, `verdifax_cres_receipt_hash()` and `verdifax_run_statuses()`.
 
 `verdifax_get_run_artifacts()`, `verdifax_get_public_bundle()`, `verdifax_get_public_bundle_by_token()`, `verdifax_get_policy_history()`, `verdifax_get_account_policy_history()`, `verdifax_get_signoffs()`, `verdifax_get_signoff_history()` and `verdifax_get_failure_receipt()` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
 
@@ -187,7 +191,7 @@ check <- verdifax_verify_run(client, result$run_id)
 
 ## Batch runs
 
-`verdifax_execute_batch()` sends up to 1,000 runs in one request and stops with an error for more, before sending anything. Each row is a list with the argument names of `verdifax_attest()`. A row that fails comes back in `results` with `ok` set to `FALSE`, so the call does not stop for it. A name the server does not know, in a row or in its `attested_context`, stops the call before anything is sent, because the server would drop it with no error.
+`verdifax_execute_batch()` sends up to 1,000 runs in one request and stops with an error for more, before sending anything. Each row is a list with the argument names of `verdifax_attest()`. A row that fails comes back in `results` with `ok` set to `FALSE`, so the call does not stop for it. A name the server does not know, in a row or in its `attested_context`, stops the call before anything is sent, because the server refuses the whole batch with HTTP 400, naming it.
 
 ```r
 batch <- verdifax_execute_batch(client, list(
@@ -387,6 +391,26 @@ Every change to the account's policy must be signed by the owner key's request k
 
 `verdifax_revoke_account_key()` revokes a member key. A key in another account, or an owner key, answers HTTP 404. A member key on a trial account needs its own request key before it seals anything, as every trial key does: see Request signing. An admin can also put a new key in an existing account with `verdifax_admin_create_key(admin, name, account_id = created$account$id)`. `verdifax_admin_list_accounts()` lists every account with its key counts.
 
+### Settings and deletions the owner decides
+
+The owner decides two settings, each `"allowed"` or `"blocked"`, which `verdifax_get_account()` returns as `owner_replacement` and `verdifax_deletion`. While `owner-replacement` is blocked, Verdifax cannot replace the account's owner key; while `verdifax-deletion` is blocked, Verdifax cannot delete the account's records. The owner can also delete one of the account's records itself.
+
+```r
+# The owner blocks both changes Verdifax could make. Each is signed by the
+# owner's request key, sealed and placed in the feed as account.changed.
+verdifax_set_account_setting(owner, "owner-replacement", "blocked")
+verdifax_set_account_setting(owner, "verdifax-deletion", "blocked")
+
+# The owner deletes one record, named by its record hash. A tombstone is
+# sealed in its place and placed in the feed as run.deleted. Here `result`
+# is what verdifax_attest() returned to a member key of the account.
+verdifax_delete_run(owner, result$run_id, result$record_hash)
+```
+
+Each of these is signed by the owner key's request key, over `verdifax.owner-change-signature.v1`, the account's label (for example `account-7`, read from `verdifax_get_account()` unless you pass `account_id`), the change, its subject, the time and a fresh nonce. Verdifax never holds the owner's request key, so it cannot make a signature with it, and `verdifax-verify --signals --owner-request-key` confirms every owner change in the feed was signed with the owner's key. A client without a `signing_key` is refused before anything is sent. Setting a value already set changes nothing and returns `account_change` as `NULL`. Each call stops with an error when the record the server returns does not carry what was sent: the change and value, or the run and record hash, `decided_by` `owner`, and the signature, time and nonce sent, under the client's own request key. `verdifax_delete_run()` takes a completed run's `record_hash`, or a stopped run's receipt hash; the server answers HTTP 409 for another hash, and for a public record, which is withdrawn first with `verdifax_unpublish_run()`.
+
+An admin key starts the replacement of a lost owner key with `verdifax_admin_replace_owner_key(admin, account_id)`, on the owner's written request, and deletes a record as Verdifax's decision with `verdifax_admin_delete_run(admin, run_id)`. Each is sealed in the account's feed with `decided_by` `verdifax_admin`, and each is refused with HTTP 409 while the owner blocks it. A replacement emails a one-time link, valid for 72 hours, to the address on file, and the new owner key is made when the owner opens it, so the response holds neither the link nor a key. `verdifax-verify --signals` fails a feed that shows a Verdifax replacement or deletion after the owner's block.
+
 ## Sign-off
 
 A sign-off is an approver's decision, approve or reject, on one exact result: a completed run's record, a refused or halted run's receipt, or a whole job by its final step. The account's owner registers approver keys. The approver signs on their own machine with the approver key, which is never sent, and any key in the account can submit the sign-off.
@@ -448,7 +472,7 @@ The verifier reads sign-offs since v0.22.0: `verdifax-verify --signoff FILE` che
 
 ## Signal feed
 
-The signal feed is every control signal Verdifax recorded for the account, in order, each with its sealed entry: a run refused, halted or failed, a policy change, a sign-off, an approver key registered or revoked, and a key created or revoked. Each event is a CloudEvent. The feed cannot show a signal Verdifax never recorded.
+The signal feed is every control signal Verdifax recorded for the account, in order, each with its sealed entry, or, for an event whose record was deleted, that record's tombstone: a run sealed (`run.sealed`), a run refused, halted or failed, a policy change, a sign-off, an approver key registered or revoked, a key created or revoked, a record made public or withdrawn (`run.published`, `run.unpublished`), an account change (`account.changed`), a record deleted (`run.deleted`), a restore gap (`chain.gap`) and an interrupted entry (`chain.interrupted`). A key change may be `verdifax.key-change.v2`, which names who decided it in `decided_by`. Each event is a CloudEvent. The feed cannot show a signal Verdifax never recorded.
 
 The owner key creates a feed key, which reads the feed and nothing else, and can read the same feed itself with `as_owner = TRUE`.
 
@@ -468,7 +492,7 @@ verdifax_follow_signals(feed, function(event) {
 
 `verdifax_follow_signals()` reads each page from the `next_after` of the one before, so no event is skipped. When a read fails, it stops with an error of class `verdifax_follow_error` whose `after` is the last sequence handled: call it again with that `after` to go on. `verdifax_get_signals()` reads one page with `after`, `limit` (1 to 500) and `wait` (0 to 25 seconds). Its HTTP timeout is at least the wait plus 30 seconds. `verdifax_signal_event_hash()` recomputes an event's `event_hash`, and `verdifax-verify --signals` checks a saved feed.
 
-`verdifax_pending_signoffs(events)` returns, in feed order, the run ids whose allowing policy rule requires a person's sign-off (their `run.sealed` event says `signoff_required`) and on which no approval is in force, read as `verdifax-verify` reads it: the latest sign-off on the run's whole job governs when there is one, and otherwise the latest sign-off on its record; a receipt sign-off does not count. Pass the feed from its start, or pages that include each run's sign-offs. It makes no request.
+`verdifax_pending_signoffs(events)` returns, in feed order, the run ids whose allowing policy rule requires a person's sign-off (their `run.sealed` event says `signoff_required`) and on which no approval is in force, read as `verdifax-verify` reads it: the latest sign-off on the run's whole job governs when there is one, and otherwise the latest sign-off on its record; a receipt sign-off does not count. A run whose record was deleted, by a `run.deleted` event anywhere in the events given, is left out. Pass the feed from its start, or pages that include each run's sign-offs and deletion. It makes no request.
 
 A webhook posts each new event to an `https://` address, signed under the Standard Webhooks scheme. A delivery is a copy: the pull feed and the public log are the record. Check each delivery on the raw body bytes, before any JSON parsing:
 
@@ -494,7 +518,7 @@ Both take an optional `job` block and return what `verdifax_attest()` returns, i
 
 ## Optional execute fields
 
-`verdifax_attest()`, `verdifax_execute()`, `verdifax_execute_batch()` and `verdifax_verify_determinism()` accept `attested_context`, `reproducibility_context`, `request_substance`, `authorization_chain`, `regulatory_scaffolding` and `causal_graph`. Each is recorded as supplied and Verdifax does not check it, but an `attested_context` field name outside `actor_id`, `actor_role`, `authorization_policy`, `actor_signature`, `model_provider`, `model_name`, `model_version`, `model_temperature`, `prompt_hash`, `decision_kind`, `decision_result` and `decision_note` is refused before sending, so a misspelt field is never dropped. They also accept `policy_context` and `expected_policy_hash`, which are checked before sending: see [Policies](#policies). Write a JSON array as an unnamed list, so that one item stays an array. The client derives `attested` and `declared` from the fields you provide. Leave out `request_substance$origin$source_ip_hash` and `user_agent_hash`: the server computes them. `verdifax_attest()`, `verdifax_execute()` and `verdifax_verify_determinism()` refuse them before sending, and a batch row that sets them fails in `results`.
+`verdifax_attest()`, `verdifax_execute()`, `verdifax_execute_batch()` and `verdifax_verify_determinism()` accept `attested_context`, `reproducibility_context`, `request_substance`, `authorization_chain`, `regulatory_scaffolding` and `causal_graph`. In a completed run's sealed record each is recorded as supplied, except the values the server observes itself (in `request_substance`, `latency.total_ms`, the authentication method and key, and the origin hashes it fills; in `regulatory_scaffolding`, empty data-residency regions it fills), and Verdifax does not check that what you declare is true. A refused or halted run's receipt holds none of these blocks, but its `receipt_context` seals the declared policy inputs (such as subject and object identifiers) when the policy names its author and its rules ran. An `attested_context` field name outside `attested` (which the client sets itself from the fields you provide), `actor_id`, `actor_role`, `authorization_policy`, `actor_signature`, `model_provider`, `model_name`, `model_version`, `model_temperature`, `prompt_hash`, `decision_kind`, `decision_result` and `decision_note` is refused before sending, so a misspelt field is never dropped. They also accept `policy_context` and `expected_policy_hash`, which are checked before sending: see [Policies](#policies). Write a JSON array as an unnamed list, so that one item stays an array. The client derives `attested` and `declared` from the fields you provide. Leave out `request_substance$origin$source_ip_hash` and `user_agent_hash`: the server computes them. `verdifax_attest()`, `verdifax_execute()` and `verdifax_verify_determinism()` refuse them before sending, and a batch row that sets them fails in `results`.
 
 These functions check that `program_id` and `registry_record_hash` are 64 lowercase hex characters and that `route_id` is 1 to 256 printable ASCII characters.
 
@@ -523,11 +547,12 @@ is grounded on **manifest hash** equality, the seal of the pipeline
 output. Bundle hash differences (when surfaced in
 `diff$differing_fields`) indicate server-observed timing variation
 and are labeled `(informational)`. Both runs are recorded, with the
-status `probe`.
+status `probe`, or `stage_error` for a replay that sealed nothing or
+whose record could not be anchored on the probe's in-process ledger.
 
 ## Request signing
 
-A trial key, which is what a pilot receives, needs a request key: it seals nothing until one is registered, and the key can then be replaced but not cleared. On a production key, request signing is optional, and a client with no signing key sends the same requests as before.
+A trial key, which is what a pilot receives, needs a request key: it seals nothing until one is registered. Its holder can then replace the request key but not clear it; only Verdifax can clear it, for a holder who lost it, after which the trial key again seals nothing until a new one is registered, and for a key in an account the clearing is sealed in that account's feed as an account change. On a production key, request signing is optional, and a client with no signing key sends the same requests as before.
 
 You can register an Ed25519 public key on your API key, so that each run must also be signed with a private key that only you hold. The key pair is created on your machine, and Verdifax receives only the public key. Signing needs the `sodium` package:
 
@@ -543,8 +568,9 @@ client <- verdifax_client(signing_key = keys$private_key)
 verdifax_register_request_key(client) # sends the public key with its proof
 
 # verdifax_attest(), verdifax_execute_batch(),
-# verdifax_verify_determinism(), verdifax_activate_policy() and
-# verdifax_activate_account_policy() now sign.
+# verdifax_verify_determinism(), verdifax_activate_policy(),
+# verdifax_activate_account_policy(), verdifax_set_account_setting() and
+# verdifax_delete_run() now sign.
 result <- verdifax_attest(
   client = client,
   payload = "my-analysis-output",

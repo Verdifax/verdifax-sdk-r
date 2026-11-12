@@ -215,8 +215,8 @@ verdifax_export_runs_csv <- function(client, from = NULL, to = NULL, job_id = NU
       call. = FALSE
     )
   }
-  # The server ignores a field it does not know, so a misspelt one would be
-  # dropped with no error.
+  # The server refuses a field it does not know with HTTP 400, for the whole
+  # batch, so a misspelt one is refused here, before sending.
   unknown <- setdiff(names(row), .EXECUTE_FIELDS)
   if (length(unknown) > 0) {
     stop("a run has an unknown field: ", paste(unknown, collapse = ", "), call. = FALSE)

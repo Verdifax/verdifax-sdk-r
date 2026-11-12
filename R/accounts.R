@@ -16,6 +16,19 @@
 .ACCOUNT_REQUEST_KEY_PATH <- "/account/request-key"
 .ACCOUNT_RUNS_PATH <- "/account/runs"
 .ADMIN_ACCOUNTS_PATH <- "/admin/accounts"
+.ACCOUNT_SETTINGS_PATH <- "/account/settings"
+# Each owner setting's route name and the change name its signature covers.
+.OWNER_SETTING_CHANGES <- c(
+  "owner-replacement" = "setting.owner_replacement",
+  "verdifax-deletion" = "setting.verdifax_deletion"
+)
+.OWNER_SETTING_VALUES <- c("allowed", "blocked")
+.RUN_DELETED_CHANGE <- "run.deleted"
+.OWNER_CHANGE_UNSIGNED <- paste0(
+  "an owner setting or deletion must be signed by the owner key's request key: ",
+  "construct the client with signing_key and register it with ",
+  "verdifax_register_account_request_key(), so no change was asked for"
+)
 .ACCOUNT_ACTIVATION_UNSIGNED <- paste0(
   "an account policy change must be signed by the owner key's request key: ",
   "construct the client with signing_key and register it with ",
@@ -46,8 +59,10 @@
 #'
 #' @return Parsed API response list with `ok`, `account_id` (a label such
 #'   as `"account-7"`), `id`, `name`, `tier`, `created_at`, `member_keys`
-#'   and `owner_keys` (counts of keys not revoked) and `chain_id`, the chain
-#'   of the account's policy changes.
+#'   and `owner_keys` (counts of keys not revoked), `chain_id`, the chain
+#'   of the account's policy changes, and the owner's two settings,
+#'   `owner_replacement` and `verdifax_deletion`, each `"allowed"` or
+#'   `"blocked"`, as `verdifax_set_account_setting()` sets them.
 #'
 #' @export
 verdifax_get_account <- function(client) {
@@ -73,6 +88,153 @@ verdifax_set_account_time_zone <- function(client, time_zone) {
     stop("time_zone must be a single string of at most 64 characters", call. = FALSE)
   }
   .send(client, "PUT", paste0(.ACCOUNT_PATH, "/time-zone"), list(time_zone = time_zone))
+}
+
+
+# The account label the owner's signature covers: the one given, or the
+# account_id GET /account returns. A label given is checked before any
+# request; one read from the server is checked before the change is asked for.
+.owner_account_label <- function(client, account_id) {
+  read <- is.null(account_id)
+  label <- if (read) verdifax_get_account(client)[["account_id"]] else account_id
+  if (!is.character(label) || length(label) != 1 || is.na(label) ||
+      !grepl(.SIGNAL_ACCOUNT_PATTERN, label)) {
+    stop(
+      if (read) {
+        "the server did not return account_id, so the change cannot be signed and was not asked for"
+      } else {
+        "account_id must be the account's label, for example \"account-7\""
+      },
+      call. = FALSE
+    )
+  }
+  as.vector(label)
+}
+
+# The owner signature a returned record seals is the one sent, under the
+# client's own request key.
+.same_owner_signature <- function(got, sent, signer) {
+  is.list(got) &&
+    identical(got[["signature"]], sent$signature) &&
+    identical(got[["signed_at"]], sent$signed_at) &&
+    identical(got[["nonce"]], sent$nonce) &&
+    identical(got[["public_key"]], .base64(signer$public_key))
+}
+
+# The account change the server returns must carry the action, value, owner
+# decision and owner signature that were sent, or the call stops. NULL means
+# the value was already set and nothing was sealed.
+.check_returned_account_change <- function(result, change, body, signer) {
+  record <- result[["account_change"]]
+  if (is.null(record)) {
+    return(result)
+  }
+  same <- is.list(record) &&
+    identical(record[["action"]], change) &&
+    identical(record[["value"]], body$value) &&
+    identical(record[["decided_by"]], "owner") &&
+    .same_owner_signature(record[["owner_signature"]], body$owner_signature, signer)
+  if (!same) {
+    stop(
+      "the server returned an account change that does not carry the action, value, ",
+      "decided_by owner and owner_signature that were sent",
+      call. = FALSE
+    )
+  }
+  result
+}
+
+# The tombstone the server returns must carry the run, record hash, owner
+# decision and owner signature that were sent, or the call stops.
+.check_returned_run_deletion <- function(result, run_id, body, signer) {
+  record <- result[["run_deletion"]]
+  got_id <- if (is.list(record)) record[["run_id"]]
+  same <- is.list(record) &&
+    is.numeric(got_id) && length(got_id) == 1 && !is.na(got_id) &&
+    identical(format(got_id, scientific = FALSE, trim = TRUE), run_id) &&
+    identical(record[["record_hash"]], body$record_hash) &&
+    identical(record[["decided_by"]], "owner") &&
+    .same_owner_signature(record[["owner_signature"]], body$owner_signature, signer)
+  if (!same) {
+    stop(
+      "the server returned a run deletion that does not carry the run_id, record_hash, ",
+      "decided_by owner and owner_signature that were sent",
+      call. = FALSE
+    )
+  }
+  result
+}
+
+# A label the caller gives, checked before anything is sent.
+.check_owner_account_label <- function(account_id) {
+  if (!is.null(account_id) && (!is.character(account_id) || length(account_id) != 1 ||
+      is.na(account_id) || !grepl(.SIGNAL_ACCOUNT_PATTERN, account_id))) {
+    stop("account_id must be the account's label, for example \"account-7\"", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+#' Allow or block a change Verdifax could make to the account.
+#'
+#' Calls `PUT /account/settings/{setting}` with the account's owner key.
+#' `"owner-replacement"` decides whether Verdifax may replace a lost owner
+#' key, and `"verdifax-deletion"` whether Verdifax may delete the account's
+#' records. While a setting is `"blocked"`, the server refuses that change,
+#' and `verdifax-verify --signals` fails a feed that shows one after the
+#' block.
+#'
+#' The client's request key, registered with
+#' `verdifax_register_account_request_key()`, signs the change, over
+#' `verdifax.owner-change-signature.v1`, the account's label, the change
+#' (`setting.owner_replacement` or `setting.verdifax_deletion`), the value,
+#' the time and a fresh nonce. Verdifax never holds that key, so it cannot
+#' make an owner's change. The server refuses an unsigned change, so a
+#' client without a `signing_key` is refused before any request. The change
+#' is sealed as an account change, anchored on the public log and placed in
+#' the account's signal feed as an `account.changed` event.
+#'
+#' @param client A client handle from `verdifax_client()`, holding the
+#'   account's owner key as `api_key` and constructed with the `signing_key`
+#'   registered as its request key.
+#' @param setting `"owner-replacement"` or `"verdifax-deletion"`. Anything
+#'   else is refused before sending.
+#' @param value `"allowed"` or `"blocked"`. Anything else is refused before
+#'   sending.
+#' @param account_id Optional account label the signature covers, for
+#'   example `"account-7"`. When `NULL`, it is read from
+#'   `verdifax_get_account()` first.
+#'
+#' @return Parsed API response list with `ok`, `setting`, `value` and
+#'   `account_change`, the sealed record (`format`, `action`, `decided_by`,
+#'   `value`, `changed_at`, `owner_signature`, `signal`,
+#'   `account_change_hash`, `anchor`), or `NULL` when the setting already
+#'   had that value, so nothing changed and nothing was sealed. The call
+#'   stops with an error when a returned record does not carry the change,
+#'   the value, `decided_by` `"owner"` and the `owner_signature` that were
+#'   sent, with `public_key` the client's request key.
+#'
+#' @export
+verdifax_set_account_setting <- function(client, setting, value, account_id = NULL) {
+  if (!is.character(setting) || length(setting) != 1 || is.na(setting) ||
+      !setting %in% names(.OWNER_SETTING_CHANGES)) {
+    stop("setting must be \"owner-replacement\" or \"verdifax-deletion\"", call. = FALSE)
+  }
+  if (!is.character(value) || length(value) != 1 || is.na(value) ||
+      !value %in% .OWNER_SETTING_VALUES) {
+    stop("value must be \"allowed\" or \"blocked\"", call. = FALSE)
+  }
+  .check_owner_account_label(account_id)
+  signer <- .active_signer(client)
+  if (is.null(signer)) {
+    stop(.OWNER_CHANGE_UNSIGNED, call. = FALSE)
+  }
+  account <- .owner_account_label(client, account_id)
+  setting <- as.vector(setting)
+  value <- as.vector(value)
+  change <- .OWNER_SETTING_CHANGES[[setting]]
+  body <- list(value = value, owner_signature = .owner_signature(signer, account, change, value))
+  result <- .send(client, "PUT", paste0(.ACCOUNT_SETTINGS_PATH, "/", setting), body)
+  .check_returned_account_change(result, change, body, signer)
 }
 
 
@@ -252,6 +414,58 @@ verdifax_export_account_runs_csv <- function(client, from = NULL, to = NULL, job
 }
 
 
+#' Delete one of the account's records, signed by the owner.
+#'
+#' Calls `POST /account/runs/{id}/delete` with the account's owner key. The
+#' record may have been made by any key of the account. Name the record you
+#' mean to delete by its hash: a completed run's `record_hash` from
+#' `verdifax_attest()`, or a stopped run's receipt hash. The server answers
+#' HTTP 409 when it is not this run's record hash, and when the record is
+#' public: withdraw it first with `verdifax_unpublish_run()`.
+#'
+#' The client's request key signs the deletion as
+#' `verdifax_set_account_setting()` signs a setting, with the change
+#' `run.deleted` and the subject `"<run_id>:<record_hash>"`. A client
+#' without a `signing_key` is refused before any request. The deletion is
+#' sealed as a tombstone that names the record, anchored on the public log
+#' and placed in the account's signal feed as a `run.deleted` event, so the
+#' feed and the public log still account for the record once it is gone.
+#'
+#' @inheritParams verdifax_set_account_setting
+#' @param run_id The run's id, a positive whole number.
+#' @param record_hash 64-char lowercase hex hash of the record to delete.
+#'   Anything else is refused before sending.
+#'
+#' @return Parsed API response list with `ok`, `run_id`, `deleted` and
+#'   `run_deletion`, the sealed tombstone (`format`, `decided_by`, `run_id`,
+#'   `record_hash`, `job_id`, `step_id`, `changed_at`, `owner_signature`,
+#'   `signal`, `deletion_hash`, `anchor`). The call stops with an error
+#'   when the tombstone does not carry the `run_id`, the `record_hash`,
+#'   `decided_by` `"owner"` and the `owner_signature` that were sent, with
+#'   `public_key` the client's request key.
+#'
+#' @export
+verdifax_delete_run <- function(client, run_id, record_hash, account_id = NULL) {
+  id <- .require_id(run_id, "run_id")
+  verdifax_validate_hex64(record_hash, "record_hash")
+  .check_owner_account_label(account_id)
+  signer <- .active_signer(client)
+  if (is.null(signer)) {
+    stop(.OWNER_CHANGE_UNSIGNED, call. = FALSE)
+  }
+  account <- .owner_account_label(client, account_id)
+  record_hash <- as.vector(record_hash)
+  body <- list(
+    record_hash = record_hash,
+    owner_signature = .owner_signature(
+      signer, account, .RUN_DELETED_CHANGE, paste0(id, ":", record_hash)
+    )
+  )
+  result <- .send(client, "POST", paste0(.ACCOUNT_RUNS_PATH, "/", id, "/delete"), body)
+  .check_returned_run_deletion(result, id, body, signer)
+}
+
+
 # ── The account's policy ────────────────────────────────────────────────────
 
 #' Upload a policy document for the owner key's account.
@@ -419,4 +633,52 @@ verdifax_admin_create_account <- function(client, name, tier = NULL, expires_at 
 #' @export
 verdifax_admin_list_accounts <- function(client) {
   .perform(.get(client, .ADMIN_ACCOUNTS_PATH))[["accounts"]]
+}
+
+#' Delete a record as Verdifax's decision.
+#'
+#' Calls `POST /admin/runs/{id}/delete` with an admin key. The deletion is
+#' sealed as a tombstone in the feed of the record's account, with
+#' `decided_by` `verdifax_admin`, and anchored on the public log. The
+#' server refuses it with HTTP 409 while the account's owner blocks
+#' Verdifax deletion, for a public record, which is withdrawn first, and
+#' for a run that belongs to no account.
+#'
+#' @inheritParams verdifax_health
+#' @param run_id The run's id, a positive whole number.
+#'
+#' @return Parsed API response list with `ok`, `run_id`, `deleted` and
+#'   `run_deletion`, as `verdifax_delete_run()` returns them, with no
+#'   `owner_signature`.
+#'
+#' @export
+verdifax_admin_delete_run <- function(client, run_id) {
+  .send(client, "POST", paste0("/admin/runs/", .require_id(run_id, "run_id"), "/delete"))
+}
+
+#' Start the replacement of an account's lost owner key.
+#'
+#' Calls `POST /admin/accounts/{id}/owner-key/replace` with an admin key, on
+#' the owner's written request. The server seals the request in the
+#' account's feed as an `account.changed` event and emails a one-time link,
+#' valid for 72 hours, to the address of the access request that made the
+#' account. The new owner key is made when the owner opens the link, so
+#' Verdifax never sees it, and the response holds neither the link nor a
+#' key. The server refuses it with HTTP 409 while the owner blocks owner-key
+#' replacement, and for an account with no address on file.
+#'
+#' @inheritParams verdifax_health
+#' @param account_id The account's numeric id, a positive whole number, as
+#'   `verdifax_admin_list_accounts()` lists it in `id`.
+#'
+#' @return Parsed API response list with `ok`, `account_id` (the label, such
+#'   as `"account-7"`), `claim_expires`, `account_change`, the sealed record,
+#'   and `email`, the result of sending the link.
+#'
+#' @export
+verdifax_admin_replace_owner_key <- function(client, account_id) {
+  .send(
+    client, "POST",
+    paste0(.ADMIN_ACCOUNTS_PATH, "/", .require_id(account_id, "account_id"), "/owner-key/replace")
+  )
 }

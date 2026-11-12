@@ -904,3 +904,24 @@ test_that("verdifax_pending_signoffs reads a job sign-off as the verifier does",
   # approval. 22: the job's approval governs its own rejection.
   expect_identical(verdifax_pending_signoffs(events), 21L)
 })
+
+# Round 60: a deleted record has nothing left to sign off.
+test_that("verdifax_pending_signoffs leaves out a run whose deletion is in the feed", {
+  ev <- function(seq, kind, entry) list(id = paste0("account-7/", seq), data = list(kind = kind, sequence = seq, entry = entry))
+  deletion <- function(run) list(format = "verdifax.run-deletion.v1", decided_by = "owner", run_id = run, record_hash = strrep("a", 64))
+  events <- list(
+    ev(1, "run.sealed", list(run_id = 30, signoff_required = TRUE)),
+    ev(2, "run.sealed", list(run_id = 31, signoff_required = TRUE)),
+    ev(3, "run.deleted", deletion(30)),
+    ev(4, "run.deleted", deletion(99))
+  )
+  expect_identical(verdifax_pending_signoffs(events), 31L)
+  # At any place in the events given, even before the run's sealing.
+  expect_identical(verdifax_pending_signoffs(events[c(3, 1, 2)]), 31L)
+  # A Verdifax deletion counts the same.
+  admin <- events
+  admin[[3]]$data$entry$decided_by <- "verdifax_admin"
+  expect_identical(verdifax_pending_signoffs(admin), 31L)
+  expect_identical(verdifax_pending_signoffs(events[1:2]), c(30L, 31L))
+  expect_error(verdifax_pending_signoffs(list(ev(1, "run.deleted", list()))), "names no run")
+})

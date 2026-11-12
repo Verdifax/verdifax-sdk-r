@@ -1,3 +1,17 @@
+# verdifax 1.14.0
+
+## Settings and deletions the owner decides, each sealed, and execute bodies read strictly
+
+* `verdifax_set_account_setting(client, setting, value)` (owner key) sets `owner-replacement` or `verdifax-deletion` to `allowed` or `blocked`. While a setting is blocked, Verdifax can neither replace the account's owner key nor delete its records. `verdifax_get_account()` returns both settings as `owner_replacement` and `verdifax_deletion`.
+* `verdifax_delete_run(client, run_id, record_hash)` (owner key) deletes one of the account's records, named by its record hash. A tombstone is sealed in its place.
+* Both are signed by the owner key's request key over `verdifax.owner-change-signature.v1`, the account's label, the change, its subject, the time and a fresh nonce. Verdifax never holds the owner's request key, so it cannot make a signature with it, and `verdifax-verify --signals --owner-request-key` confirms every owner change in the feed was signed with the owner's key. A client without a `signing_key` is refused before anything is sent. The account's label is read from `verdifax_get_account()` unless you pass `account_id`. Each call stops with an error when the record the server returns does not carry what was sent: the change and value, or the run and record hash, `decided_by` `owner`, and the signature, time and nonce sent under the client's own request key.
+* `verdifax_admin_replace_owner_key(client, account_id)` and `verdifax_admin_delete_run(client, run_id)` (admin key) start the replacement of a lost owner key and delete a record as Verdifax's decision. Each is sealed in the account's feed and refused while the owner blocks it. A replacement emails a one-time link to the address on file, and the response holds neither the link nor a key.
+* `verdifax_owner_change_preimage(account, change, subject, signed_at, nonce)` returns the exact bytes the owner's request key signs, to check an `owner_signature` in a sealed record. It makes no request.
+* `verdifax_pending_signoffs(events)` leaves out a run whose record was deleted: a `run.deleted` event for its `run_id`, anywhere in the events given, removes it from the list.
+* The signal feed carries two new kinds, `account.changed` and `run.deleted`, and a key change may be `verdifax.key-change.v2`, which names who decided it in `decided_by`. `verdifax_create_webhook()` takes both kinds. Webhook checks are unchanged.
+* The server now refuses a field it does not know in an `/execute`, `/execute/batch` or `/execute/verify-determinism` body with HTTP 400, naming it. Every body the SDK builds holds only fields the server defines, and the SDK still refuses an unknown field in a batch row or an `attested_context` before sending.
+* The user agent is `verdifax-r/1.14.0`.
+
 # verdifax 1.13.0
 
 ## Sign-off read as the verifier reads it, and the sign-off history's head statement.
