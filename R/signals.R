@@ -6,9 +6,15 @@
 # in order: a run refused, halted or failed, a policy change, a sign-off, an
 # approver key registered or revoked, a key created or revoked, an account
 # change, a record deleted. A key change is verdifax.key-change.v2, which
-# names who decided it (decided_by), or v1, the owner's. Each event is
-# a CloudEvent that carries its place in the account's feed and the sealed
-# entry it points to. The feed cannot show a signal Verdifax never recorded.
+# names who decided it (decided_by), or v1, the owner's. An account change
+# also seals each key's own request key registered, replaced or cleared
+# (request_key.registered, request_key.rotated, request_key.cleared), with
+# the previous key's approval of a replacement or of its holder's clear.
+# Each event is a CloudEvent that carries its place in the account's feed
+# and the sealed entry it points to. A page that reaches the feed's end also
+# carries the feed's head, verdifax.feed-head.v1: Verdifax's statement of
+# the feed's highest event, anchored on the public log. The head is not an
+# event. The feed cannot show a signal Verdifax never recorded.
 #
 # A feed key reads the feed and nothing else. The owner key reads the same
 # feed on /account/signals, creates and revokes feed keys, and subscribes
@@ -159,7 +165,35 @@
 #'   `"com.verdifax.run.refused"`), `time`, `datacontenttype` and `data`. The
 #'   `data` holds `form`, `kind`, `account`, `sequence`,
 #'   `previous_signal_hash`, `event_hash`, the sealed `entry`, and where they
-#'   apply `run_id`, `api_key_id` and `reason`.
+#'   apply `run_id`, `api_key_id` and `reason`. For an event whose entry is
+#'   a record that was deleted, for example a refused run's receipt event,
+#'   `entry` is `NULL` and `deleted` holds that record's sealed tombstone,
+#'   `verdifax.run-deletion.v1`, as `verdifax_delete_run()` returns it in
+#'   `run_deletion`, `log_entries` and `job_links` included;
+#'   `verdifax-verify --signals` reads it since v0.33.0. A `run.sealed` event keeps its own entry, since
+#'   it is its own sealed record.
+#'
+#'   An `account.changed` entry is a `verdifax.account-change.v1` record
+#'   with `format`, `action`, `decided_by`, `key_id`, `value`, `changed_at`,
+#'   `signal`, `account_change_hash` and `anchor`, and where it applies
+#'   `owner_signature` or `request_key_approval`. A key's holder registering
+#'   its first request key is `request_key.registered`, with the new public
+#'   key (base64) as `value` and `decided_by` `"owner"`. Replacing it is
+#'   `request_key.rotated`, with the new public key as `value` and
+#'   `request_key_approval`, the previous key's `public_key`, `signature`,
+#'   `signed_at` and `nonce`, signed over the same request-key change
+#'   `verdifax_rotate_request_key()` signs. The holder's own clear is
+#'   `request_key.cleared` with an empty `value`, decided by `"owner"` and
+#'   approved the same way over the empty key; a clear Verdifax decides
+#'   carries no approval.
+#'
+#'   When the page reaches the feed's end it also holds `head`, Verdifax's
+#'   statement of the feed's highest event: `format`
+#'   (`"verdifax.feed-head.v1"`), `account`, `sequence`, `head_hash` (that
+#'   event's hash), `stated_at`, `head_statement_hash` and `anchor`, its
+#'   entry on the public log. The head is not an event. `verdifax-verify
+#'   --signals` checks a saved feed against it, so a feed cut short before
+#'   a later event fails.
 #'
 #' @export
 verdifax_get_signals <- function(client, after = 0, limit = NULL, wait = 0, as_owner = FALSE) {
@@ -167,8 +201,9 @@ verdifax_get_signals <- function(client, after = 0, limit = NULL, wait = 0, as_o
 }
 
 # The error raised when following stops, holding the last sequence handled
-# so the caller can resume there.
-.follow_error <- function(after, message, parent = NULL) {
+# and that event's event_hash, so the caller can resume there with both, and
+# the feed head kept so far.
+.follow_error <- function(after, message, parent = NULL, head = NULL, after_event_hash = NULL) {
   place <- format(after, scientific = FALSE, trim = TRUE)
   structure(
     class = c("verdifax_follow_error", "error", "condition"),
@@ -179,9 +214,30 @@ verdifax_get_signals <- function(client, after = 0, limit = NULL, wait = 0, as_o
       ),
       call = NULL,
       after = after,
-      parent = parent
+      parent = parent,
+      head = head,
+      after_event_hash = after_event_hash
     )
   )
+}
+
+# Whether `read`, the head of a page whose events were all handled, is one
+# to keep over `kept`: it states the feed through the last event handled,
+# its sequence the page's `next_after` and its head_hash that event's
+# event_hash, `handled_hash`; it is not the head statement already kept (the
+# same head_statement_hash, as served again on an idle read); and it states
+# no lower sequence. A fresh statement for the same sequence, which the
+# server makes once its 5-minute reuse ends, replaces the one kept. Before an
+# event is handled `handled_hash` is the caller's after_event_hash, and with
+# none it is NULL and no head is kept.
+.newer_head <- function(kept, read, next_after, handled_hash) {
+  if (is.null(read) || !.is_whole(read[["sequence"]]) || read[["sequence"]] != next_after ||
+      !is.character(handled_hash) || length(handled_hash) != 1 || !nzchar(handled_hash) ||
+      !identical(read[["head_hash"]], handled_hash)) {
+    return(FALSE)
+  }
+  is.null(kept) || (read[["sequence"]] >= kept[["sequence"]] &&
+    !identical(read[["head_statement_hash"]], kept[["head_statement_hash"]]))
 }
 
 # An event's place in the feed, or NULL when it holds none.
@@ -193,13 +249,16 @@ verdifax_get_signals <- function(client, after = 0, limit = NULL, wait = 0, as_o
 # A page read from `place` must move on from it without a gap the server did
 # not account for: every event carries its sequence, in rising order, after
 # `place`, and next_after is the last event's sequence, or `place` itself
-# when the page is empty. Anything else stops following before any event of
-# the page is handled, so no event is skipped.
-.check_signals_page <- function(page, place) {
+# when the page is empty. A head, when the page holds one, is an object.
+# Anything else stops following before any event of the page is handled, so
+# no event is skipped. `head` is the head kept before this page, and
+# `handled_hash` the event_hash of the last event handled, for the error.
+.check_signals_page <- function(page, place, head = NULL, handled_hash = NULL) {
   events <- if (is.list(page)) page[["events"]]
   next_after <- if (is.list(page)) page[["next_after"]]
   if (!is.list(events) || !.is_whole(next_after)) {
-    stop(.follow_error(place, "the server's page has no events list or no next_after"))
+    stop(.follow_error(place, "the server's page has no events list or no next_after", head = head,
+                       after_event_hash = handled_hash))
   }
   sequences <- vapply(events, function(event) .event_sequence(event) %||% NA_real_, numeric(1))
   in_order <- !anyNA(sequences) && all(diff(c(place, sequences)) > 0)
@@ -207,8 +266,14 @@ verdifax_get_signals <- function(client, after = 0, limit = NULL, wait = 0, as_o
   if (!in_order || next_after != last) {
     stop(.follow_error(
       place,
-      "the server's page holds an event out of order or without data$sequence, or a next_after that is not its last event"
+      "the server's page holds an event out of order or without data$sequence, or a next_after that is not its last event",
+      head = head, after_event_hash = handled_hash
     ))
+  }
+  read <- page[["head"]]
+  if (!is.null(read) && (!is.list(read) || is.null(names(read)))) {
+    stop(.follow_error(place, "the server's page holds a head that is not an object", head = head,
+                       after_event_hash = handled_hash))
   }
   invisible(TRUE)
 }
@@ -226,43 +291,87 @@ verdifax_get_signals <- function(client, after = 0, limit = NULL, wait = 0, as_o
 #' `NULL` included, goes on. It never loses its place: when a read fails, the
 #' server's page is out of order, or `handler` raises an error, it stops with
 #' an error of class `verdifax_follow_error` whose `after` is the last
-#' sequence handled and whose `parent` is the error that stopped it. Calling
-#' again with that `after` reads on from there, beginning with the event that
-#' was not handled.
+#' sequence handled, whose `after_event_hash` is that event's `event_hash`
+#' (the one given when no event was handled, or `NULL` when none was given)
+#' and whose `parent` is the error that stopped it. Calling again with that
+#' `after` and `after_event_hash` reads on from there, beginning with the
+#' event that was not handled, and keeps a head for event `after`.
+#'
+#' A page that reaches the feed's end holds the feed's `head`, Verdifax's
+#' anchored statement of the feed's highest event (see
+#' `verdifax_get_signals()`). The head is never passed to `handler` as an
+#' event. Following keeps a page's head only once `handler` has handled
+#' every event on that page without stopping, and only when the head's
+#' `sequence` is the page's `next_after` and its `head_hash` is the
+#' `event_hash` of the last event handled, so a kept head always states the
+#' feed through the events the caller handled. Before `handler` handles an
+#' event, the last event handled is event `after`, whose hash the caller may
+#' give as `after_event_hash`: a follower resuming at the feed's end then
+#' keeps the head it is served. Without it, no head is kept until an event
+#' is handled. The
+#' head statement already kept (the same `head_statement_hash`), served
+#' again on an idle read, is not kept again, and nor is one stating a lower
+#' sequence; a fresh statement for the same sequence, made once the server's
+#' 5-minute reuse ends, replaces it. The kept head is passed to `on_head`
+#' when it is kept, after its page's events; it is the `head` attribute of
+#' the value returned and the `head` of a `verdifax_follow_error`. Each is
+#' `NULL` until a head is kept.
 #'
 #' @inheritParams verdifax_get_signals
 #' @param handler A function of one argument, the event, as a CloudEvent list
 #'   from `verdifax_get_signals()`.
 #' @param wait Seconds the server may wait for an event when there is none
 #'   yet, a whole number from 0 to 25. Defaults to 25.
+#' @param on_head Optional function of one argument, called with each feed
+#'   head as it is kept. Its return value is ignored. An error it raises
+#'   stops following as an error of `handler` does.
+#' @param after_event_hash Optional `event_hash` of event `after`, 64
+#'   lowercase hex characters, as you saved it with that event's sequence.
+#'   Anything else is refused before any request. `NULL` keeps no head until
+#'   `handler` has handled an event.
 #'
 #' @return The last sequence handled, invisibly, once `handler` returns
-#'   `FALSE`.
+#'   `FALSE`, with the newest feed head kept as its `head` attribute when one
+#'   was kept.
 #'
 #' @export
-verdifax_follow_signals <- function(client, handler, after = 0, wait = 25, as_owner = FALSE) {
+verdifax_follow_signals <- function(client, handler, after = 0, wait = 25, as_owner = FALSE,
+                                    on_head = NULL, after_event_hash = NULL) {
   if (!is.function(handler)) {
     stop("handler must be a function of one event", call. = FALSE)
+  }
+  if (!is.null(on_head) && !is.function(on_head)) {
+    stop("on_head must be a function of one feed head, or NULL", call. = FALSE)
+  }
+  if (!is.null(after_event_hash)) {
+    verdifax_validate_hex64(after_event_hash, "after_event_hash")
   }
   .signoff_base(as_owner)
   place <- .signal_after(after)
   wait <- .signal_wait(wait)
+  head <- NULL
+  # The event_hash of the last event handled: event `after`, as the caller
+  # gave it, until the first event of this call is handled.
+  handled_hash <- if (is.null(after_event_hash)) NULL else as.vector(after_event_hash)
+  stopped <- function(e) stop(.follow_error(place, conditionMessage(e), e, head, handled_hash))
   repeat {
-    page <- tryCatch(
-      .perform(.signals_request(client, place, NULL, wait, as_owner)),
-      error = function(e) stop(.follow_error(place, conditionMessage(e), e))
-    )
-    .check_signals_page(page, place)
+    page <- tryCatch(.perform(.signals_request(client, place, NULL, wait, as_owner)), error = stopped)
+    .check_signals_page(page, place, head, handled_hash)
     events <- page[["events"]]
     for (event in events) {
       sequence <- .event_sequence(event)
-      result <- tryCatch(
-        handler(event),
-        error = function(e) stop(.follow_error(place, conditionMessage(e), e))
-      )
+      result <- tryCatch(handler(event), error = stopped)
       place <- sequence
+      handled_hash <- event[["data"]][["event_hash"]]
       if (isFALSE(result)) {
+        attr(place, "head") <- head
         return(invisible(place))
+      }
+    }
+    if (.newer_head(head, page[["head"]], page[["next_after"]], handled_hash)) {
+      head <- page[["head"]]
+      if (!is.null(on_head)) {
+        tryCatch(on_head(head), error = stopped)
       }
     }
     if (length(events) == 0 && wait == 0) {
@@ -633,7 +742,12 @@ verdifax_get_failure_receipt <- function(client, run_id) {
 #' there is one, and otherwise the last record sign-off; a receipt sign-off
 #' does not name a record (round 59, N15 and N19). A run whose record was
 #' deleted, by a `run.deleted` event for its `run_id` at any place in the
-#' events given, is left out, since there is no record left to sign off.
+#' events given, is left out, since there is no record left to sign off. A
+#' `run.sealed` event is its own sealed record, so the feed keeps its entry
+#' when the run's record is deleted. A `run.sealed` or `run.deleted` event
+#' whose entry names no run, a positive whole number, stops with an error;
+#' every other kind is passed over. The shared vector
+#' `sdk-pending-signoffs-vector.json` holds the four SDKs to this rule.
 #' Pass the account's feed from its start, or a page that includes each
 #' run's sign-offs and deletion, so a sign-off or deletion recorded later is
 #' seen.
@@ -654,7 +768,7 @@ verdifax_pending_signoffs <- function(events) {
     entry <- data$entry
     if (identical(data$kind, "run.sealed")) {
       run <- entry$run_id
-      if (!is.numeric(run) || length(run) != 1) {
+      if (!.is_whole(run) || run < 1) {
         stop("verdifax: the run.sealed entry of event ", e$id, " names no run", call. = FALSE)
       }
       if (isTRUE(entry$signoff_required) && !(run %in% order)) {
@@ -662,7 +776,7 @@ verdifax_pending_signoffs <- function(events) {
       }
     } else if (identical(data$kind, "run.deleted")) {
       run <- entry$run_id
-      if (!is.numeric(run) || length(run) != 1) {
+      if (!.is_whole(run) || run < 1) {
         stop("verdifax: the run.deleted entry of event ", e$id, " names no run", call. = FALSE)
       }
       deleted <- c(deleted, run)

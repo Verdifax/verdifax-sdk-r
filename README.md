@@ -137,6 +137,7 @@ GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 42
 | `verdifax_list_account_keys()` | `GET /account/keys` |
 | `verdifax_revoke_account_key()` | `DELETE /account/keys/{id}` |
 | `verdifax_register_account_request_key()` | `POST /account/request-key` |
+| `verdifax_rotate_account_request_key()` | `POST /account/request-key`, with the current key's approval |
 | `verdifax_clear_account_request_key()` | `DELETE /account/request-key` |
 | `verdifax_list_account_runs()` | `GET /account/runs` |
 | `verdifax_export_account_runs()` | `GET /account/runs/export` |
@@ -353,6 +354,8 @@ owner <- verdifax_client(
   signing_key = request_key$private_key
 )
 verdifax_register_account_request_key(owner)
+# Later, the owner replaces it: the current key approves the new one.
+# verdifax_rotate_account_request_key(owner, verdifax_generate_request_key()$private_key)
 
 # The owner creates the member keys that run.
 member <- verdifax_create_account_key(owner, "loan-decisions")
@@ -385,7 +388,7 @@ The account's view covers the runs its keys made through Verdifax, not runs made
 
 An owner key cannot run anything. The server refuses it with HTTP 403 on the routes that run or read runs, so use member keys for runs and the owner key with the account functions above.
 
-Every change to the account's policy must be signed by the owner key's request key, over the account's chain, for example `account-7`. `verdifax_activate_account_policy()` reads that chain and its newest change from `verdifax_list_account_policies()` and signs as `verdifax_activate_policy()` does. A client without a `signing_key` is refused before anything is sent, because the server refuses an unsigned change. Rolling back is activating an earlier document, and `verdifax_get_account_policy_history()` returns the chain of changes for `verdifax-verify --policy-history`.
+Every change to the account's policy must be signed by the owner key's request key, over the account's chain, for example `account-7`. `verdifax_activate_account_policy()` reads that chain and its newest change from `verdifax_list_account_policies()` and signs as `verdifax_activate_policy()` does. A client without a `signing_key` is refused before anything is sent, because the server refuses an unsigned change. `verdifax_rotate_account_request_key()` replaces the owner key's request key, approved by the current one, and the client switches to the new key only once the server accepts; a refusal, such as HTTP 409 when another change to that key came first, leaves the current key in place. Rolling back is activating an earlier document, and `verdifax_get_account_policy_history()` returns the chain of changes for `verdifax-verify --policy-history`.
 
 `verdifax_export_account_runs()` and `verdifax_export_account_runs_csv()` take the same period and `job_id` as `verdifax_export_runs()`. The JSON export also holds `account_id`, `signoffs`, the account's whole chain of sign-offs, and, once the account has policy documents, `account_policy_documents` and `account_policy_history`. `verdifax_list_account_runs()` pages through the same runs with `limit` and `offset`. Every row and run holds `api_key_id`, so you can tell which of the account's keys requested it.
 
@@ -472,7 +475,9 @@ The verifier reads sign-offs since v0.22.0: `verdifax-verify --signoff FILE` che
 
 ## Signal feed
 
-The signal feed is every control signal Verdifax recorded for the account, in order, each with its sealed entry, or, for an event whose record was deleted, that record's tombstone: a run sealed (`run.sealed`), a run refused, halted or failed, a policy change, a sign-off, an approver key registered or revoked, a key created or revoked, a record made public or withdrawn (`run.published`, `run.unpublished`), an account change (`account.changed`), a record deleted (`run.deleted`), a restore gap (`chain.gap`) and an interrupted entry (`chain.interrupted`). A key change may be `verdifax.key-change.v2`, which names who decided it in `decided_by`. Each event is a CloudEvent. The feed cannot show a signal Verdifax never recorded.
+The signal feed is every control signal Verdifax recorded for the account, in order, each with its sealed entry, or, for an event whose record was deleted, that record's tombstone: a run sealed (`run.sealed`), a run refused, halted or failed, a policy change, a sign-off, an approver key registered or revoked, a key created or revoked, a record made public or withdrawn (`run.published`, `run.unpublished`), an account change (`account.changed`), a record deleted (`run.deleted`), a restore gap (`chain.gap`) and an interrupted entry (`chain.interrupted`). A key change may be `verdifax.key-change.v2`, which names who decided it in `decided_by`. An account change also seals each key's own request key: `request_key.registered` with the new public key, `request_key.rotated` with the new public key and `request_key_approval`, the previous key's signature over the change, and `request_key.cleared`, approved the same way when the key's holder clears it and with no approval when Verdifax does. Each event is a CloudEvent. The feed cannot show a signal Verdifax never recorded.
+
+A page that reaches the feed's end also holds `head`, Verdifax's statement of the feed's highest event (`verdifax.feed-head.v1`, with `account`, `sequence`, `head_hash`, `stated_at`, `head_statement_hash` and `anchor`, its entry on the public log). The head is not an event. Save it with the feed: `verdifax-verify --signals` checks the feed against it, so a feed cut short before a later event fails.
 
 The owner key creates a feed key, which reads the feed and nothing else, and can read the same feed itself with `as_owner = TRUE`.
 
@@ -485,14 +490,16 @@ feed_key <- verdifax_create_feed_key(owner, "siem")
 feed <- verdifax_client(api_key = feed_key$secret)
 verdifax_follow_signals(feed, function(event) {
   message(event$data$sequence, " ", event$type)
-  saveRDS(event$data$sequence, "last-sequence.rds") # your place, to resume
+  saveRDS(event$data[c("sequence", "event_hash")], "last-event.rds") # your place, to resume
   TRUE # return FALSE to stop
-}, after = 0)
+}, after = 0, on_head = function(head) {
+  saveRDS(head, "feed-head.rds") # the head through the events handled
+})
 ```
 
-`verdifax_follow_signals()` reads each page from the `next_after` of the one before, so no event is skipped. When a read fails, it stops with an error of class `verdifax_follow_error` whose `after` is the last sequence handled: call it again with that `after` to go on. `verdifax_get_signals()` reads one page with `after`, `limit` (1 to 500) and `wait` (0 to 25 seconds). Its HTTP timeout is at least the wait plus 30 seconds. `verdifax_signal_event_hash()` recomputes an event's `event_hash`, and `verdifax-verify --signals` checks a saved feed.
+`verdifax_follow_signals()` reads each page from the `next_after` of the one before, so no event is skipped. When a read fails, it stops with an error of class `verdifax_follow_error` whose `after` is the last sequence handled and whose `after_event_hash` is that event's `event_hash`: call it again with both, as `after` and `after_event_hash`, to go on. It never passes the feed's head to the handler as an event. It keeps a page's head only once the handler has handled every event on that page, and only when the head's `sequence` is the page's `next_after` and its `head_hash` is the `event_hash` of the last event handled, so a kept head states the feed through the events you handled. To resume at the feed's end and still keep the head, save each event's `event_hash` with its sequence and pass it back as `after_event_hash`; the head statement already kept, served again on an idle read, is not kept again, while a fresh statement for the same sequence replaces it. `on_head` receives each head as it is kept, the value returned holds it as its `head` attribute, and a `verdifax_follow_error` holds it as `head`. For an event whose entry is a record that was deleted, for example a refused run's receipt event, `entry` is `NULL` and `deleted` holds the record's tombstone, with `log_entries`, the public-log entries of the deleted record, and, for a job step deleted from round 61 on, `job_links`, the step's own links (`previous_record_hashes`, `external_previous` and `final`). `verdifax_get_signals()` reads one page with `after`, `limit` (1 to 500) and `wait` (0 to 25 seconds). Its HTTP timeout is at least the wait plus 30 seconds. `verdifax_signal_event_hash()` recomputes an event's `event_hash`, and `verdifax-verify --signals` checks a saved feed.
 
-`verdifax_pending_signoffs(events)` returns, in feed order, the run ids whose allowing policy rule requires a person's sign-off (their `run.sealed` event says `signoff_required`) and on which no approval is in force, read as `verdifax-verify` reads it: the latest sign-off on the run's whole job governs when there is one, and otherwise the latest sign-off on its record; a receipt sign-off does not count. A run whose record was deleted, by a `run.deleted` event anywhere in the events given, is left out. Pass the feed from its start, or pages that include each run's sign-offs and deletion. It makes no request.
+`verdifax_pending_signoffs(events)` returns, in feed order, the run ids whose allowing policy rule requires a person's sign-off (their `run.sealed` event says `signoff_required`) and on which no approval is in force, read as `verdifax-verify` reads it: the latest sign-off on the run's whole job governs when there is one, and otherwise the latest sign-off on its record; a receipt sign-off does not count. A run whose record was deleted, by a `run.deleted` event anywhere in the events given, is left out; the server keeps the run's `run.sealed` event and its entry, and a `run.sealed` or `run.deleted` event whose entry names no run (a positive whole number) stops with an error. Pass the feed from its start, or pages that include each run's sign-offs and deletion. It makes no request.
 
 A webhook posts each new event to an `https://` address, signed under the Standard Webhooks scheme. A delivery is a copy: the pull feed and the public log are the record. Check each delivery on the raw body bytes, before any JSON parsing:
 
@@ -592,7 +599,7 @@ Registering a key changes that API key for every client that uses it: the server
 
 A signed call serializes the request once and signs those exact bytes with signature version 2, which also covers the AI output and the job block. The request goes as `signed_request`, a JSON string, beside `request_signature`, and the server reads only that text. The result holds `signed_request`, so you can save it and check it with `verdifax-verify --request FILE`. A refused or halted run stops with the httr2 error, and that condition holds `signed_request` and `record_hash`. In a batch each result holds its row's `signed_request`, and a job keeps each step's text in `job$signed_requests`, refused steps included. `verdifax_execute()` returns only the manifest, so use `verdifax_attest()` when you need the text. Its errors hold both fields. `verdifax_sign_request()` and `verdifax_request_signature_preimage()` still build the older version 1 signature, which cannot carry a job.
 
-Once a key is registered, the server needs that key to approve replacing or clearing it. `verdifax_rotate_request_key()` and `verdifax_clear_request_key()` send that approval, so call them with a client that holds the current key. After a rotate the client and its copies sign with the new key. After a clear they drop the key and send unsigned requests, because the server refuses a signed run on an API key with no registered key. If the key is lost, an admin can clear it with `verdifax_admin_clear_request_key()` after a manual check.
+Once a key is registered, the server needs that key to approve replacing or clearing it. `verdifax_rotate_request_key()` and `verdifax_clear_request_key()` send that approval, so call them with a client that holds the current key. For a key in an account, each registration, replacement and clear by the key's holder is sealed in the account's signal feed as an account change (`request_key.registered`, `request_key.rotated`, `request_key.cleared`), the replacement and the clear with that approval, so the feed shows each key's chain of request keys. When another change to the key's request key came first, the server answers HTTP 409 "the request key changed since this change was signed": the call stops with the server's message, as an `httr2_http_409` error, and the client keeps its key. After a rotate the client and its copies sign with the new key. After a clear they drop the key and send unsigned requests, because the server refuses a signed run on an API key with no registered key. If the key is lost, an admin can clear it with `verdifax_admin_clear_request_key()` after a manual check.
 
 In a batch each row carries its own signature and nonce, and the server checks them as it reaches that row. A row refused for its signature comes back in `results`, so a repeated batch returns HTTP 200 with failed rows, and a row reached more than five minutes after it was signed fails the same way. A determinism check uses one signature for the request, and repeating it returns HTTP 403.
 

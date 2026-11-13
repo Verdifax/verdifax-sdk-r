@@ -535,3 +535,343 @@ test_that("the signal kinds are the server's SignalKinds", {
   names_in_order <- setdiff(names_in_order, "SignalKinds")
   expect_identical(verdifax:::.SIGNAL_KINDS, unname(values[names_in_order]))
 })
+
+
+# ── Each key's request key, sealed in the feed (round 61, N22) ──────────────
+
+.moved <- "the request key changed since this change was signed; read the key again and sign the change with it"
+.signed_at <- "2026-11-12T18:00:00Z"
+.nonce <- "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+
+# The bytes a request key signs to approve the change to new_key, written
+# out independently of the SDK, as the server's RequestKeyChangePreimage.
+key_change_bytes <- function(new_key, signed_at, nonce) {
+  fields <- lapply(list("verdifax.request-key-change.v1", new_key, signed_at, nonce), function(text) charToRaw(text))
+  Reduce(function(a, b) c(a, as.raw(0), b), fields)
+}
+
+approval_verifies <- function(approval, new_key) {
+  sodium::sig_verify(
+    key_change_bytes(new_key, approval$signed_at, approval$nonce),
+    jsonlite::base64_dec(approval$signature), jsonlite::base64_dec(approval$public_key)
+  )
+}
+
+# One sealed account change for key 12's request key, with every field the
+# server sends.
+key_account_change <- function(action, decided_by, value, sequence, approval = NULL) {
+  change <- list(
+    format = "verdifax.account-change.v1", action = action, decided_by = decided_by,
+    key_id = 12L, value = value, changed_at = "2026-11-12T18:00:01.5Z",
+    request_key_approval = approval,
+    signal = list(
+      signal_account = "account-7", signal_sequence = sequence,
+      signal_previous_hash = strrep(as.character(sequence %% 10), 64)
+    ),
+    account_change_hash = strrep("c", 64),
+    anchor = list(kind = "receipt_anchor", receipt_kind = "account_change", log_index = 100L + sequence)
+  )
+  Filter(Negate(is.null), change)
+}
+
+account_changed_event <- function(entry) {
+  sequence <- entry$signal$signal_sequence
+  list(
+    specversion = "1.0", id = paste0("account-7/", sequence),
+    source = "https://api.verdifax.com/accounts/account-7", type = "com.verdifax.account.changed",
+    time = "2026-11-12T18:00:01.5Z", datacontenttype = "application/json",
+    data = list(
+      form = "verdifax.signal.v1", kind = "account.changed", account = "account-7", sequence = sequence,
+      previous_signal_hash = strrep("e", 64), event_hash = strrep("d", 64), api_key_id = 12L, entry = entry
+    )
+  )
+}
+
+# The four request-key changes the feed carries for key 12: registered, then
+# rotated to a second key with the first key's approval, then cleared by its
+# holder with the second key's approval, then, after a new registration,
+# cleared by Verdifax with no approval.
+request_key_changes <- function() {
+  first <- sodium::sig_keygen(.seed)
+  second <- sodium::sig_keygen(as.raw(rep(2L, 32)))
+  second_public <- jsonlite::base64_enc(sodium::sig_pubkey(second))
+  approve <- function(expanded, new_key) {
+    list(
+      public_key = jsonlite::base64_enc(sodium::sig_pubkey(expanded)),
+      signature = jsonlite::base64_enc(sodium::sig_sign(key_change_bytes(new_key, .signed_at, .nonce), expanded)),
+      signed_at = .signed_at, nonce = .nonce
+    )
+  }
+  list(
+    key_account_change("request_key.registered", "owner", .public_key, 11L),
+    key_account_change("request_key.rotated", "owner", second_public, 12L, approve(first, second_public)),
+    key_account_change("request_key.cleared", "owner", "", 13L, approve(second, "")),
+    key_account_change("request_key.registered", "owner", .public_key, 14L),
+    key_account_change("request_key.cleared", "verdifax_admin", "", 15L)
+  )
+}
+
+feed_page_text <- function(events, head = NULL) {
+  last <- events[[length(events)]]$data$sequence
+  page <- list(events = events, next_after = last, newest = last, head = head)
+  as.character(jsonlite::toJSON(Filter(Negate(is.null), page), auto_unbox = TRUE, digits = 22, null = "null"))
+}
+
+test_that("each request-key account change in the feed is read with every field", {
+  need_sodium()
+  entries <- request_key_changes()
+  text <- feed_page_text(lapply(entries, account_changed_event))
+  capture(page <- verdifax_get_signals(owner_client(), after = 10, as_owner = TRUE), function(req) json_response(text))
+  expect_length(page$events, 5)
+  base <- c("format", "action", "decided_by", "key_id", "value", "changed_at", "signal", "account_change_hash", "anchor")
+  for (i in seq_along(entries)) {
+    got <- page$events[[i]]$data$entry
+    expect_identical(got, entries[[i]])
+    approved <- !is.null(entries[[i]]$request_key_approval)
+    expect_setequal(names(got), c(base, if (approved) "request_key_approval"))
+    expect_identical(got$format, "verdifax.account-change.v1")
+    expect_identical(got$key_id, 12L)
+    expect_null(got$owner_signature)
+  }
+  registered <- page$events[[1]]$data$entry
+  expect_identical(registered$action, "request_key.registered")
+  expect_identical(registered$decided_by, "owner")
+  expect_identical(registered$value, .public_key)
+  expect_null(registered$request_key_approval)
+
+  rotated <- page$events[[2]]$data$entry
+  expect_identical(rotated$action, "request_key.rotated")
+  expect_identical(rotated$decided_by, "owner")
+  expect_setequal(names(rotated$request_key_approval), c("public_key", "signature", "signed_at", "nonce"))
+  # The previous key approves the new one, over the request-key change.
+  expect_identical(rotated$request_key_approval$public_key, .public_key)
+  expect_identical(rotated$request_key_approval$signed_at, .signed_at)
+  expect_identical(rotated$request_key_approval$nonce, .nonce)
+  expect_true(approval_verifies(rotated$request_key_approval, rotated$value))
+  expect_error(approval_verifies(rotated$request_key_approval, .public_key))
+
+  cleared <- page$events[[3]]$data$entry
+  expect_identical(cleared$action, "request_key.cleared")
+  expect_identical(cleared$decided_by, "owner")
+  expect_identical(cleared$value, "")
+  # The key in force, the rotated one, approves the clear over the empty key.
+  expect_identical(cleared$request_key_approval$public_key, rotated$value)
+  expect_true(approval_verifies(cleared$request_key_approval, ""))
+
+  admin <- page$events[[5]]$data$entry
+  expect_identical(admin$action, "request_key.cleared")
+  expect_identical(admin$decided_by, "verdifax_admin")
+  expect_identical(admin$value, "")
+  expect_null(admin$request_key_approval)
+})
+
+test_that("the approval a rotate or clear sends is the request_key_approval the server seals", {
+  need_sodium()
+  client <- verdifax_client(base_url = "http://mock.invalid", api_key = "member", signing_key = .seed)
+  new_key <- as.raw(rep(2L, 32))
+  ok <- function(req) json_response("{\"ok\":true}")
+  sent <- capture(verdifax_rotate_request_key(client, new_key), ok)
+  body <- sent[[1]]$body
+  sealed <- c(list(public_key = .public_key), body$change)
+  expect_true(approval_verifies(sealed, body$public_key))
+  sent <- capture(verdifax_clear_request_key(client), ok)
+  sealed <- c(list(public_key = body$public_key), sent[[1]]$body$change)
+  expect_true(approval_verifies(sealed, ""))
+})
+
+test_that("pending sign-offs and the follow loop read the new account changes and the head", {
+  need_sodium()
+  so <- function(run, decision) list(decision = decision, target = list(kind = "record", run_id = run))
+  sealed_run <- function(seq, run) {
+    list(id = paste0("account-7/", seq), data = list(kind = "run.sealed", sequence = seq, entry = list(run_id = run, signoff_required = TRUE)))
+  }
+  changes <- lapply(request_key_changes(), account_changed_event)
+  events <- c(
+    list(sealed_run(1L, 40), sealed_run(2L, 41)),
+    changes,
+    list(list(id = "account-7/16", data = list(kind = "signoff.recorded", sequence = 16L, entry = so(40, "approve"))))
+  )
+  expect_identical(verdifax_pending_signoffs(events), 41L)
+  expect_identical(verdifax_pending_signoffs(changes), integer(0))
+
+  head <- list(
+    format = "verdifax.feed-head.v1", account = "account-7", sequence = 15L, head_hash = strrep("d", 64),
+    stated_at = "2026-11-12T18:00:02Z", head_statement_hash = strrep("b", 64), anchor = list(receipt_kind = "feed_head")
+  )
+  pages <- list(feed_page_text(changes, head), feed_page_text(list(account_changed_event(
+    key_account_change("request_key.registered", "owner", .public_key, 16L)
+  ))))
+  calls <- 0
+  seen <- list()
+  capture(last <- verdifax_follow_signals(owner_client(), function(event) {
+    seen[[length(seen) + 1]] <<- event
+    event$data$sequence < 16
+  }, after = 10, as_owner = TRUE), function(req) {
+    calls <<- calls + 1
+    json_response(pages[[calls]])
+  })
+  expect_length(seen, 6)
+  expect_identical(lapply(seen[1:5], function(e) e$data$entry), request_key_changes())
+  expect_identical(attr(last, "head"), head)
+  expect_equal(as.vector(last), 16)
+})
+
+test_that("a request-key change another change overtook stops with the server's 409 message", {
+  need_sodium()
+  conflict <- function(req) json_response(sprintf("{\"ok\":false,\"error\":\"%s\"}", .moved), 409)
+  calls <- list(
+    list(route = "POST /keys/request-key", call = function(client) verdifax_register_request_key(client)),
+    list(route = "POST /keys/request-key", call = function(client) verdifax_rotate_request_key(client, as.raw(rep(2L, 32)))),
+    list(route = "DELETE /keys/request-key", call = function(client) verdifax_clear_request_key(client)),
+    list(route = "POST /account/request-key", call = function(client) verdifax_register_account_request_key(client)),
+    list(route = "POST /account/request-key", call = function(client) verdifax_rotate_account_request_key(client, as.raw(rep(2L, 32)))),
+    list(route = "DELETE /account/request-key", call = function(client) verdifax_clear_account_request_key(client))
+  )
+  for (case in calls) {
+    client <- signed_owner_client()
+    sent <- capture(
+      expect_error(case$call(client), "the request key changed since this change was signed", class = "httr2_http_409"),
+      conflict
+    )
+    expect_length(sent, 1)
+    expect_identical(paste(sent[[1]]$method, sent[[1]]$path), case$route)
+    # The client keeps the key it held: a refused change changed nothing.
+    signer <- verdifax:::.active_signer(client)
+    expect_false(is.null(signer), info = case$route)
+    expect_identical(jsonlite::base64_enc(signer$public_key), .public_key, info = case$route)
+  }
+})
+
+
+# ── Round 60 fields: the tombstone's log entries and a deleted record's event ─
+
+.log_entries <- list(strrep("1", 64), strrep("2", 64))
+
+test_that("delete_run returns the tombstone's log_entries as the server sealed them", {
+  need_sodium()
+  with_entries <- function(record) {
+    record$job_id <- "loan-17"
+    record$step_id <- "score"
+    record$log_entries <- .log_entries
+    record
+  }
+  capture(
+    result <- verdifax_delete_run(signed_owner_client(), 42, .record_hash, account_id = "account-7"),
+    function(req) if (grepl("/delete$", httr2::req_get_url(req))) sealed_reply(req, with_entries) else change_server(req)
+  )
+  expect_identical(result$run_deletion$log_entries, .log_entries)
+  expect_identical(result$run_deletion$job_id, "loan-17")
+  expect_identical(result$run_deletion$step_id, "score")
+})
+
+# The feed serves an event whose entry is a deleted record, here a refused
+# run's receipt event, with entry null and the record's tombstone in deleted.
+test_that("an event whose entry was deleted is read with its entry NULL and its tombstone in deleted", {
+  tombstone <- list(
+    format = "verdifax.run-deletion.v1", decided_by = "owner", run_id = 42L, record_hash = .record_hash,
+    job_id = "loan-17", step_id = "score", log_entries = .log_entries,
+    changed_at = "2026-11-12T18:00:00.1Z",
+    owner_signature = list(public_key = .public_key, signature = "c2ln", signed_at = .signed_at, nonce = .nonce),
+    signal = list(signal_account = "account-7", signal_sequence = 4L, signal_previous_hash = strrep("3", 64)),
+    deletion_hash = strrep("d", 64),
+    anchor = list(kind = "receipt_anchor", receipt_kind = "run_deletion", log_index = 104L)
+  )
+  refused <- list(
+    specversion = "1.0", id = "account-7/3", source = "https://api.verdifax.com/accounts/account-7",
+    type = "com.verdifax.run.refused", time = "2026-11-12T17:00:00Z", datacontenttype = "application/json",
+    data = list(
+      form = "verdifax.signal.v1", kind = "run.refused", account = "account-7", sequence = 3L,
+      previous_signal_hash = strrep("e", 64), event_hash = strrep("d", 64), run_id = 42L,
+      reason = "the record was deleted by owner; its tombstone stands in its place",
+      entry = NULL, deleted = tombstone
+    )
+  )
+  text <- as.character(jsonlite::toJSON(
+    list(events = list(refused), next_after = 3L, newest = 4L), auto_unbox = TRUE, digits = 22, null = "null"
+  ))
+  expect_match(text, "\"entry\":null", fixed = FALSE)
+  capture(page <- verdifax_get_signals(owner_client(), after = 2, as_owner = TRUE), function(req) json_response(text))
+  data <- page$events[[1]]$data
+  expect_true("entry" %in% names(data))
+  expect_null(data$entry)
+  expect_identical(data$deleted, tombstone)
+  expect_identical(data$deleted$log_entries, .log_entries)
+  # The follow loop passes the event on as it came.
+  capture(last <- verdifax_follow_signals(owner_client(), function(event) {
+    expect_identical(event$data$deleted, tombstone)
+    FALSE
+  }, after = 2, as_owner = TRUE), function(req) json_response(text))
+  expect_equal(as.vector(last), 3)
+})
+
+
+# ── Round 61: a deleted job step's own links in its tombstone ───────────────
+
+.job_links <- list(
+  previous_record_hashes = list(strrep("4", 64), strrep("5", 64)),
+  external_previous = list(strrep("6", 64)),
+  final = TRUE
+)
+
+test_that("delete_run returns the tombstone's job_links intact, and a tombstone without them", {
+  need_sodium()
+  for (links in list(.job_links, list(previous_record_hashes = list(strrep("4", 64))), NULL)) {
+    with_links <- function(record) {
+      record$job_id <- "loan-17"
+      record$step_id <- "score"
+      record$job_links <- links
+      record
+    }
+    capture(
+      result <- verdifax_delete_run(signed_owner_client(), 42, .record_hash, account_id = "account-7"),
+      function(req) sealed_reply(req, with_links)
+    )
+    expect_identical(result$run_deletion$job_links, links)
+    if (is.null(links)) {
+      expect_false("job_links" %in% names(result$run_deletion))
+    } else {
+      # Lists stay lists, even with one hash.
+      expect_type(result$run_deletion$job_links$previous_record_hashes, "list")
+    }
+  }
+  # An empty job_links, present on a job step with no links, reads as an
+  # empty object.
+  empty <- function(req) {
+    reply <- sealed_reply(req)
+    text <- sub("\"deletion_hash\"", "\"job_links\":{},\"deletion_hash\"", httr2::resp_body_string(reply), fixed = TRUE)
+    json_response(text)
+  }
+  capture(result <- verdifax_delete_run(signed_owner_client(), 42, .record_hash, account_id = "account-7"), empty)
+  expect_true("job_links" %in% names(result$run_deletion))
+  expect_length(result$run_deletion$job_links, 0)
+})
+
+test_that("a feed event's tombstone keeps its job_links intact", {
+  tombstone <- function(links) {
+    out <- list(
+      format = "verdifax.run-deletion.v1", decided_by = "verdifax_admin", run_id = 43L, record_hash = .record_hash,
+      job_id = "loan-17", step_id = "approve", job_links = links, log_entries = .log_entries,
+      changed_at = "2026-11-12T18:00:00.1Z",
+      signal = list(signal_account = "account-7", signal_sequence = 6L, signal_previous_hash = strrep("5", 64)),
+      deletion_hash = strrep("d", 64)
+    )
+    Filter(Negate(is.null), out)
+  }
+  for (links in list(.job_links, NULL)) {
+    event <- list(
+      specversion = "1.0", id = "account-7/5", source = "https://api.verdifax.com/accounts/account-7",
+      type = "com.verdifax.run.refused", time = "2026-11-12T17:00:00Z", datacontenttype = "application/json",
+      data = list(
+        form = "verdifax.signal.v1", kind = "run.refused", account = "account-7", sequence = 5L,
+        previous_signal_hash = strrep("e", 64), event_hash = strrep("d", 64), run_id = 43L,
+        entry = NULL, deleted = tombstone(links)
+      )
+    )
+    text <- as.character(jsonlite::toJSON(
+      list(events = list(event), next_after = 5L, newest = 6L), auto_unbox = TRUE, digits = 22, null = "null"
+    ))
+    capture(page <- verdifax_get_signals(owner_client(), after = 4, as_owner = TRUE), function(req) json_response(text))
+    expect_identical(page$events[[1]]$data$deleted, tombstone(links))
+    expect_identical(page$events[[1]]$data$deleted$job_links, links)
+  }
+})

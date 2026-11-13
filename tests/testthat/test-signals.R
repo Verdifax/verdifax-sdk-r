@@ -31,6 +31,10 @@ to_json <- function(value) {
   as.character(jsonlite::toJSON(value, auto_unbox = TRUE, digits = 22, null = "null"))
 }
 
+# An event's hash, derived from its sequence, as the shared feed-head vector
+# says: the SHA-256 of "e" and the sequence.
+event_hash_of <- function(sequence) as.character(openssl::sha256(paste0("e", sequence)))
+
 # One CloudEvent of the feed.
 cloud_event <- function(sequence, kind = "run.refused") {
   list(
@@ -42,7 +46,7 @@ cloud_event <- function(sequence, kind = "run.refused") {
     datacontenttype = "application/json",
     data = list(
       form = "verdifax.signal.v1", kind = kind, account = "account-7", sequence = sequence,
-      previous_signal_hash = strrep("e", 64), event_hash = strrep("d", 64), run_id = 42L,
+      previous_signal_hash = strrep("e", 64), event_hash = event_hash_of(sequence), run_id = 42L,
       entry = list(hash = strrep("a", 64))
     )
   )
@@ -404,8 +408,376 @@ test_that("follow_signals refuses bad arguments without a request", {
     for (flag in list(NA, "yes", 1, NULL)) {
       expect_error(verdifax_follow_signals(feed_client(), identity, as_owner = flag), "as_owner")
     }
+    for (on_head in list("f", 1, TRUE, list())) {
+      expect_error(verdifax_follow_signals(feed_client(), identity, on_head = on_head), "on_head")
+    }
+    for (hash in list(strrep("A", 64), strrep("a", 63), c(strrep("a", 64), strrep("b", 64)), NA, 1, TRUE)) {
+      expect_error(
+        verdifax_follow_signals(feed_client(), identity, after = 3, after_event_hash = hash),
+        "after_event_hash must be 64 lowercase hex characters"
+      )
+    }
   })
   expect_length(sent, 0)
+})
+
+
+# ── The feed's head (round 61, N23) ─────────────────────────────────────────
+
+# Verdifax's statement of the feed's highest event, as the server serves it at
+# the end of a page that reaches the feed's end. Each statement's hash is
+# derived from its sequence and time, so a restated head has a fresh one.
+feed_head <- function(sequence, stated_at = "2026-11-12T22:00:00Z",
+                      statement = paste(sequence, stated_at), head_hash = event_hash_of(sequence)) {
+  list(
+    format = "verdifax.feed-head.v1", account = "account-7", sequence = sequence,
+    head_hash = head_hash, stated_at = stated_at,
+    head_statement_hash = as.character(openssl::sha256(statement)),
+    anchor = list(
+      kind = "receipt_anchor", receipt_kind = "feed_head",
+      log_index = 40L, tree_size = 41L, inclusion_path = list(strrep("1", 64))
+    )
+  )
+}
+
+head_page <- function(sequences, next_after, head) {
+  json_response(to_json(list(
+    events = lapply(sequences, cloud_event), next_after = next_after, newest = next_after, head = head
+  )))
+}
+
+test_that("get_signals returns the page's head with every field", {
+  text <- to_json(list(
+    events = list(cloud_event(8L), cloud_event(9L)), next_after = 9L, newest = 9L, head = feed_head(9L)
+  ))
+  sent <- capture(page <- verdifax_get_signals(feed_client(), after = 7), function(req) json_response(text))
+  expect_length(sent, 1)
+  expect_length(page$events, 2)
+  expect_setequal(
+    names(page$head),
+    c("format", "account", "sequence", "head_hash", "stated_at", "head_statement_hash", "anchor")
+  )
+  expect_identical(page$head$format, "verdifax.feed-head.v1")
+  expect_identical(page$head$account, "account-7")
+  expect_equal(page$head$sequence, 9)
+  expect_identical(page$head$head_hash, event_hash_of(9))
+  expect_identical(page$head$stated_at, "2026-11-12T22:00:00Z")
+  expect_identical(page$head$head_statement_hash, as.character(openssl::sha256("9 2026-11-12T22:00:00Z")))
+  expect_identical(page$head$anchor$receipt_kind, "feed_head")
+  expect_identical(page$head$anchor$inclusion_path, list(strrep("1", 64)))
+  # The events are the events alone: the head is not one of them.
+  expect_equal(vapply(page$events, function(e) e$data$sequence, numeric(1)), c(8, 9))
+})
+
+# A follow over `pages`, each a function returning a response, in turn.
+follow_pages <- function(pages, handler, ...) {
+  calls <- 0
+  respond <- function(req) {
+    calls <<- calls + 1
+    pages[[calls]]()
+  }
+  heads <- list()
+  result <- NULL
+  sent <- capture(result <- tryCatch(
+    verdifax_follow_signals(feed_client(), handler, on_head = function(head) {
+      heads[[length(heads) + 1]] <<- head
+      "ignored"
+    }, ...),
+    error = identity
+  ), respond)
+  list(result = result, heads = heads, sent = sent)
+}
+
+test_that("follow_signals never passes the head as an event and keeps it after its page's events", {
+  restated <- feed_head(3L, stated_at = "2026-11-12T22:06:00Z")
+  pages <- list(
+    function() signals_page(list(1L, 2L), 2L),
+    function() head_page(list(3L), 3L, feed_head(3L)),
+    function() head_page(list(), 3L, feed_head(3L)),
+    function() head_page(list(), 3L, restated),
+    function() head_page(list(4L, 5L), 5L, feed_head(5L)),
+    function() head_page(list(6L), 6L, feed_head(6L))
+  )
+  seen <- list()
+  heads_when <- c()
+  out <- follow_pages(pages, function(event) {
+    seen[[length(seen) + 1]] <<- event
+    event$data$sequence < 6
+  })
+  expect_length(out$sent, 6)
+  expect_equal(vapply(seen, function(e) e$data$sequence, numeric(1)), c(1, 2, 3, 4, 5, 6))
+  for (event in seen) {
+    expect_identical(event$specversion, "1.0")
+    expect_false("head_hash" %in% names(event))
+  }
+  # The same head served again on an idle read is not passed twice; a
+  # restated one is. The head of the page the handler stopped on is not kept.
+  expect_identical(out$heads, list(feed_head(3L), restated, feed_head(5L)))
+  expect_equal(as.vector(out$result), 6)
+  expect_identical(attr(out$result, "head"), feed_head(5L))
+  expect_equal(vapply(out$sent, function(r) r$query$after, ""), c("0", "2", "3", "3", "3", "5"))
+})
+
+test_that("on_head is called only after every event of its page is handled", {
+  order <- c()
+  calls <- 0
+  respond <- function(req) {
+    calls <<- calls + 1
+    if (calls == 1) head_page(list(1L, 2L), 2L, feed_head(2L)) else signals_page(list(3L), 3L)
+  }
+  capture(verdifax_follow_signals(feed_client(), function(event) {
+    order <<- c(order, paste0("event ", event$data$sequence))
+    event$data$sequence < 3
+  }, on_head = function(head) order <<- c(order, paste0("head ", head$sequence))), respond)
+  expect_identical(order, c("event 1", "event 2", "head 2", "event 3"))
+})
+
+test_that("follow_signals returns no head attribute when no head was kept", {
+  capture(last <- verdifax_follow_signals(feed_client(), function(event) FALSE))
+  expect_null(attr(last, "head"))
+  expect_identical(last, 1L)
+})
+
+test_that("a head whose sequence is not the page's next_after is not kept", {
+  for (sequence in c(4L, 6L)) {
+    out <- follow_pages(list(
+      function() head_page(list(5L), 5L, feed_head(sequence)),
+      function() signals_page(list(6L), 6L)
+    ), function(event) event$data$sequence < 6, after = 4)
+    expect_length(out$heads, 0)
+    expect_null(attr(out$result, "head"))
+  }
+  # A head with no whole sequence is not kept either.
+  bad <- feed_head(5L)
+  bad$sequence <- "5"
+  out <- follow_pages(list(
+    function() head_page(list(5L), 5L, bad),
+    function() signals_page(list(6L), 6L)
+  ), function(event) event$data$sequence < 6, after = 4)
+  expect_length(out$heads, 0)
+})
+
+test_that("a head on a page the handler did not finish is not kept", {
+  # Stopped mid-page.
+  out <- follow_pages(list(function() head_page(list(1L, 2L), 2L, feed_head(2L))), function(event) FALSE)
+  expect_length(out$heads, 0)
+  expect_equal(as.vector(out$result), 1)
+  expect_null(attr(out$result, "head"))
+  # Stopped on the page's last event.
+  out <- follow_pages(list(function() head_page(list(1L, 2L), 2L, feed_head(2L))), function(event) {
+    event$data$sequence < 2
+  })
+  expect_length(out$heads, 0)
+  expect_null(attr(out$result, "head"))
+  # A handler error on the page: the error holds the head kept before it.
+  out <- follow_pages(list(
+    function() head_page(list(1L), 1L, feed_head(1L)),
+    function() head_page(list(2L, 3L), 3L, feed_head(3L))
+  ), function(event) if (event$data$sequence == 3) stop("disk full") else TRUE)
+  expect_s3_class(out$result, "verdifax_follow_error")
+  expect_equal(out$result$after, 2)
+  expect_identical(out$heads, list(feed_head(1L)))
+  expect_identical(out$result$head, feed_head(1L))
+})
+
+test_that("a head stating a lower sequence than the one kept does not replace it", {
+  out <- follow_pages(list(
+    function() head_page(list(6L), 6L, feed_head(6L)),
+    function() head_page(list(), 6L, NULL),
+    function() head_page(list(7L), 7L, NULL)
+  ), function(event) event$data$sequence < 7)
+  expect_identical(out$heads, list(feed_head(6L)))
+  expect_identical(attr(out$result, "head"), feed_head(6L))
+  kept <- feed_head(6L)
+  lower <- feed_head(5L)
+  expect_false(verdifax:::.newer_head(kept, lower, 5, event_hash_of(5)))
+  expect_true(verdifax:::.newer_head(NULL, lower, 5, event_hash_of(5)))
+  # The same statement is not kept again; a fresh one for its sequence is.
+  expect_false(verdifax:::.newer_head(kept, feed_head(6L), 6, event_hash_of(6)))
+  expect_true(verdifax:::.newer_head(kept, feed_head(6L, stated_at = "2026-11-12T22:06:00Z"), 6, event_hash_of(6)))
+})
+
+test_that("a follow error holds the head kept", {
+  calls <- 0
+  respond <- function(req) {
+    calls <<- calls + 1
+    if (calls == 1) head_page(list(1L), 1L, feed_head(1L)) else
+      json_response("{\"ok\":false,\"error\":\"the key is revoked\"}", 401)
+  }
+  capture(error <- tryCatch(
+    verdifax_follow_signals(feed_client(), function(event) TRUE),
+    error = identity
+  ), respond)
+  expect_s3_class(error, "verdifax_follow_error")
+  expect_equal(error$after, 1)
+  expect_identical(error$head, feed_head(1L))
+  capture(error <- tryCatch(
+    verdifax_follow_signals(feed_client(), function(event) stop("disk full")),
+    error = identity
+  ))
+  expect_null(error$head)
+})
+
+test_that("a follow error holds the event_hash of the last event handled, to resume with", {
+  # A handler error on event 2: event 1 was the last handled.
+  capture(error <- tryCatch(
+    verdifax_follow_signals(feed_client(), function(event) if (event$data$sequence == 2) stop("disk full") else TRUE),
+    error = identity
+  ))
+  expect_equal(error$after, 1)
+  expect_identical(error$after_event_hash, event_hash_of(1))
+  # A failed read after a page: its last event.
+  calls <- 0
+  respond <- function(req) {
+    calls <<- calls + 1
+    if (calls == 1) signals_page(list(1L, 2L), 2L) else json_response("{\"ok\":false,\"error\":\"busy\"}", 401)
+  }
+  capture(error <- tryCatch(verdifax_follow_signals(feed_client(), function(event) TRUE), error = identity), respond)
+  expect_equal(error$after, 2)
+  expect_identical(error$after_event_hash, event_hash_of(2))
+  # A malformed page before any event: the hash given, or NULL with none.
+  out_of_order <- function(req) signals_page(list(3L), 3L)
+  capture(error <- tryCatch(
+    verdifax_follow_signals(feed_client(), function(event) TRUE, after = 5, after_event_hash = event_hash_of(5)),
+    error = identity
+  ), out_of_order)
+  expect_equal(error$after, 5)
+  expect_identical(error$after_event_hash, event_hash_of(5))
+  capture(error <- tryCatch(
+    verdifax_follow_signals(feed_client(), function(event) TRUE, after = 5),
+    error = identity
+  ), out_of_order)
+  expect_null(error$after_event_hash)
+  # Resuming with both values keeps the head at the feed's end.
+  heads <- list()
+  calls <- 0
+  respond <- function(req) {
+    calls <<- calls + 1
+    if (calls == 1) head_page(list(), 2L, feed_head(2L)) else json_response("{\"ok\":false,\"error\":\"busy\"}", 401)
+  }
+  capture(resumed <- tryCatch(verdifax_follow_signals(
+    feed_client(), function(event) TRUE, after = 2, after_event_hash = event_hash_of(2),
+    on_head = function(head) heads[[length(heads) + 1]] <<- head
+  ), error = identity), respond)
+  expect_identical(heads, list(feed_head(2L)))
+  expect_identical(resumed$head, feed_head(2L))
+  expect_identical(resumed$after_event_hash, event_hash_of(2))
+})
+
+test_that("an on_head error stops following at the page's last event, holding the head", {
+  seen <- c()
+  sent <- capture(error <- tryCatch(
+    verdifax_follow_signals(
+      feed_client(), function(event) {
+        seen <<- c(seen, event$data$sequence)
+        TRUE
+      },
+      after = 4, on_head = function(head) stop("cannot save the head")
+    ),
+    error = identity
+  ), function(req) head_page(list(5L), 5L, feed_head(5L)))
+  expect_length(sent, 1)
+  expect_equal(seen, 5)
+  expect_s3_class(error, "verdifax_follow_error")
+  expect_equal(error$after, 5)
+  expect_match(conditionMessage(error), "cannot save the head")
+  expect_identical(error$head, feed_head(5L))
+})
+
+# The rule every SDK's follower keeps the head by, fixed by a vector the four
+# SDKs share (round 61, R252). Each case's pages are served in order; once
+# they are spent the next read fails, so the follow error holds the head
+# kept. handle_until is the last event the caller finishes before it stops,
+# and start, when given, is where it resumes: after `after`, passing the
+# event_hash of event after_hash_of as after_event_hash when that is given.
+# A head is {sequence, statement}: the head served has a head_statement_hash
+# that is the SHA-256 of the statement label, so equal labels are the same
+# statement.
+test_that("vector: the feed head is kept and reported as sdk-feed-head-vector.json says", {
+  vector <- jsonlite::fromJSON(testthat::test_path("sdk-feed-head-vector.json"), simplifyVector = FALSE)
+  expect_gte(length(vector$cases), 13)
+  vector_head <- function(head) {
+    hash_of <- if (is.null(head$head_hash_of)) head$sequence else head$head_hash_of
+    feed_head(as.integer(head$sequence), statement = head$statement, head_hash = event_hash_of(hash_of))
+  }
+  label_of <- function(head) {
+    if (is.null(head)) {
+      return(NULL)
+    }
+    labels <- unique(unlist(lapply(vector$cases, function(case) {
+      lapply(case$pages, function(page) page$head$statement)
+    })))
+    found <- labels[vapply(labels, function(label) {
+      identical(head$head_statement_hash, as.character(openssl::sha256(label)))
+    }, logical(1))]
+    list(sequence = head$sequence, statement = found)
+  }
+  expect_true(any(vapply(vector$cases, function(case) {
+    any(vapply(case$pages, function(page) !is.null(page$head$head_hash_of), logical(1)))
+  }, logical(1))))
+  for (case in vector$cases) {
+    pages <- lapply(case$pages, function(page) {
+      events <- lapply(page$events, function(sequence) cloud_event(as.integer(sequence)))
+      body <- list(events = events, next_after = page$next_after, newest = page$next_after)
+      if (!is.null(page$head)) {
+        body$head <- vector_head(page$head)
+      }
+      to_json(body)
+    })
+    calls <- 0
+    respond <- function(req) {
+      calls <<- calls + 1
+      if (calls <= length(pages)) json_response(pages[[calls]]) else
+        json_response("{\"ok\":false,\"error\":\"no more pages in this case\"}", 410)
+    }
+    reported <- list()
+    after <- if (is.null(case$start)) 0 else case$start$after
+    after_hash <- if (!is.null(case$start$after_hash_of)) event_hash_of(case$start$after_hash_of)
+    capture(result <- tryCatch(
+      verdifax_follow_signals(feed_client(), function(event) {
+        is.null(case$handle_until) || event$data$sequence < case$handle_until
+      }, after = after, after_event_hash = after_hash, on_head = function(head) reported[[length(reported) + 1]] <<- head),
+      error = identity
+    ), respond)
+    stopped_at <- if (inherits(result, "verdifax_follow_error")) result$after else as.vector(result)
+    expect_equal(stopped_at, if (is.null(case$handle_until)) {
+      max(c(after, unlist(lapply(case$pages, function(page) page$events))))
+    } else {
+      case$handle_until
+    }, info = case$name)
+    if (is.null(case$handle_until)) {
+      expect_s3_class(result, "verdifax_follow_error")
+      expect_match(conditionMessage(result), "no more pages in this case")
+      kept <- result$head
+    } else {
+      expect_equal(as.vector(result), case$handle_until, info = case$name)
+      kept <- attr(result, "head")
+    }
+    expected_kept <- if (is.null(case$expected_kept)) NULL else vector_head(case$expected_kept)
+    expect_identical(kept, expected_kept, info = case$name)
+    expect_identical(label_of(kept), case$expected_kept, info = case$name)
+    expect_identical(lapply(reported, label_of), case$expected_reported, info = case$name)
+    expect_equal(calls, length(pages) + if (is.null(case$handle_until)) 1 else 0, info = case$name)
+  }
+})
+
+test_that("a page whose head is not an object stops following without handling its events", {
+  for (head in list("head", 7L, list(1L, 2L))) {
+    seen <- c()
+    text <- to_json(list(events = list(cloud_event(1L)), next_after = 1L, newest = 1L, head = head))
+    sent <- capture(error <- tryCatch(
+      verdifax_follow_signals(feed_client(), function(event) {
+        seen <<- c(seen, event$data$sequence)
+        TRUE
+      }),
+      error = identity
+    ), function(req) json_response(text))
+    expect_s3_class(error, "verdifax_follow_error")
+    expect_match(conditionMessage(error), "head that is not an object")
+    expect_equal(error$after, 0)
+    expect_null(seen)
+    expect_length(sent, 1)
+  }
 })
 
 
@@ -903,6 +1275,62 @@ test_that("verdifax_pending_signoffs reads a job sign-off as the verifier does",
   # 20: approved by its job. 21: the job's rejection governs its own
   # approval. 22: the job's approval governs its own rejection.
   expect_identical(verdifax_pending_signoffs(events), 21L)
+})
+
+# Round 61: the server keeps a run.sealed event's own entry when the run's
+# record is deleted, so a run.sealed event that names no run, a NULL entry
+# included, is refused as before; the run.deleted event leaves the run out.
+test_that("verdifax_pending_signoffs refuses a run.sealed event with a NULL entry and reads a deleted run's events", {
+  ev <- function(seq, kind, entry, deleted = NULL) {
+    list(id = paste0("account-7/", seq), data = c(list(kind = kind, sequence = seq, entry = entry), if (!is.null(deleted)) list(deleted = deleted)))
+  }
+  tombstone <- function(run) list(format = "verdifax.run-deletion.v1", decided_by = "owner", run_id = run, record_hash = strrep("a", 64), log_entries = list(strrep("1", 64)))
+  # A deleted run's run.sealed event keeps its entry; its run.deleted event
+  # leaves the run out.
+  events <- list(
+    ev(1, "run.sealed", list(run_id = 50, signoff_required = TRUE)),
+    ev(2, "run.sealed", list(run_id = 51, signoff_required = TRUE)),
+    ev(3, "run.deleted", tombstone(50))
+  )
+  expect_identical(verdifax_pending_signoffs(events), 51L)
+  expect_identical(verdifax_pending_signoffs(events[1:2]), c(50L, 51L))
+  # A run.sealed event with a NULL entry is refused, with or without a
+  # tombstone beside it, as read from the server or built here.
+  expect_error(verdifax_pending_signoffs(list(ev(1, "run.sealed", NULL))), "the run.sealed entry of event account-7/1 names no run")
+  expect_error(verdifax_pending_signoffs(list(ev(1, "run.sealed", NULL, tombstone(50)), events[[3]])), "the run.sealed entry of event account-7/1 names no run")
+  text <- "{\"id\":\"account-7/1\",\"data\":{\"kind\":\"run.sealed\",\"sequence\":1,\"entry\":null,\"deleted\":{\"run_id\":50}}}"
+  expect_error(verdifax_pending_signoffs(list(jsonlite::fromJSON(text, simplifyVector = FALSE))), "names no run")
+})
+
+# The rule every SDK's pending sign-offs helper answers by, fixed by a vector
+# the four SDKs share (round 61, R257). Each abstract event becomes a served
+# CloudEvent as the other feed tests build them; entry and deleted are kept
+# exactly, null included.
+test_that("vector: pending sign-offs answer as sdk-pending-signoffs-vector.json says", {
+  vector <- jsonlite::fromJSON(testthat::test_path("sdk-pending-signoffs-vector.json"), simplifyVector = FALSE)
+  expect_gte(length(vector$cases), 8)
+  for (case in vector$cases) {
+    events <- lapply(seq_along(case$events), function(i) {
+      abstract <- case$events[[i]]
+      event <- cloud_event(i, abstract$kind)
+      event$data["entry"] <- list(abstract$entry)
+      if (!is.null(abstract$deleted)) {
+        event$data$deleted <- abstract$deleted
+      }
+      event
+    })
+    # Served as JSON and read back, as a page of the feed is.
+    page <- jsonlite::fromJSON(to_json(list(events = events)), simplifyVector = FALSE)
+    if (isTRUE(case$expected_error)) {
+      expect_error(verdifax_pending_signoffs(page$events), "names no run", info = case$name)
+    } else {
+      expect_identical(
+        verdifax_pending_signoffs(page$events),
+        as.integer(unlist(case$expected_pending)) %||% integer(0),
+        info = case$name
+      )
+    }
+  }
 })
 
 # Round 60: a deleted record has nothing left to sign off.

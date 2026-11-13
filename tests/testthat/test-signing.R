@@ -707,3 +707,79 @@ test_that("the private key is not printed or sent", {
     expect_false(grepl(secret, wire, fixed = TRUE))
   }
 })
+
+
+# ── The owner key's request key, replaced (round 61) ────────────────────────
+
+test_that("rotate_account_request_key sends the new key, its proof and the current key's approval", {
+  need_sodium()
+  client <- signed_client()
+  new_key <- as.raw(rep(2L, 32))
+  registration <- verdifax_request_key_registration_body(new_key)
+  sent <- capture_requests(result <- verdifax_rotate_account_request_key(client, new_key))
+  expect_length(sent, 1)
+  expect_equal(sent[[1]]$method, "POST")
+  expect_match(sent[[1]]$url, "/account/request-key$")
+  body <- sent[[1]]$body
+  expect_setequal(names(body), c("public_key", "proof", "change"))
+  expect_equal(body$public_key, registration$public_key)
+  expect_equal(body$proof, registration$proof)
+  expect_true(change_verifies(body$change, body$public_key))
+  expect_error(change_verifies(body$change, body$public_key, public_key = body$public_key))
+  expect_true(result$ok)
+})
+
+test_that("after an account rotate the client and its copies sign with the new key", {
+  need_sodium()
+  client <- signed_client()
+  copy <- client
+  new_key <- as.raw(rep(2L, 32))
+  new_public <- jsonlite::base64_dec(verdifax_request_key_registration_body(new_key)$public_key)
+  capture_requests(verdifax_rotate_account_request_key(client, new_key))
+  sent <- capture_requests({
+    attest(client, "hello")
+    attest(copy, "hello")
+  })
+  expect_true(signature_verifies(sent[[1]]$body, new_public))
+  expect_true(signature_verifies(sent[[2]]$body, new_public))
+  expect_error(signature_verifies(sent[[1]]$body))
+})
+
+test_that("a refused account rotate keeps the current key", {
+  need_sodium()
+  for (refusal in list(
+    list(403, "the current request key must approve this change", "httr2_http_403"),
+    list(409, "the request key changed since this change was signed", "httr2_http_409")
+  )) {
+    client <- signed_client()
+    refuse <- function(req) {
+      httr2::response(
+        status_code = refusal[[1]],
+        headers = "Content-Type: application/json",
+        body = charToRaw(sprintf("{\"ok\":false,\"error\":\"%s\"}", refusal[[2]]))
+      )
+    }
+    httr2::with_mocked_responses(refuse, expect_error(
+      verdifax_rotate_account_request_key(client, as.raw(rep(2L, 32))),
+      refusal[[2]],
+      class = refusal[[3]]
+    ))
+    sent <- capture_requests(attest(client, "hello"))
+    expect_true(signature_verifies(sent[[1]]$body))
+  }
+})
+
+test_that("account rotate is refused before sending without a key or with a bad new key", {
+  sent <- capture_requests(
+    expect_error(
+      verdifax_rotate_account_request_key(unsigned_client(), as.raw(rep(2L, 32))),
+      "verdifax_rotate_account_request_key needs a client with signing_key"
+    )
+  )
+  expect_length(sent, 0)
+  need_sodium()
+  sent <- capture_requests(
+    expect_error(verdifax_rotate_account_request_key(signed_client(), raw(3)), "32 raw bytes")
+  )
+  expect_length(sent, 0)
+})

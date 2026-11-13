@@ -301,7 +301,12 @@ verdifax_revoke_account_key <- function(client, key_id) {
 #' Calls `POST /account/request-key` with the same body as
 #' `verdifax_register_request_key()`: the public key with a proof that this
 #' client holds the private key. The server needs this key to sign every
-#' change to the account's policy.
+#' change to the account's policy. The server seals the registration in the
+#' account's signal feed as an `account.changed` event,
+#' `request_key.registered`, with the public key and `decided_by` `"owner"`.
+#' An HTTP 409 "the request key changed since this change was signed" means
+#' another change to the owner key's request key came first: the call stops
+#' with the server's message, as an `httr2_http_409` error.
 #'
 #' @param client A client handle from `verdifax_client()`, holding the
 #'   account's owner key as `api_key` and constructed with `signing_key`.
@@ -320,6 +325,37 @@ verdifax_register_account_request_key <- function(client) {
   .send(client, "POST", .ACCOUNT_REQUEST_KEY_PATH, .request_key_body(signer))
 }
 
+#' Replace the owner key's request key.
+#'
+#' Calls `POST /account/request-key` with the same body as
+#' `verdifax_rotate_request_key()`: the new public key with its proof, made
+#' by the new key, and an approval made by the current key. After success
+#' the client signs with the new key, and so does every copy of the client;
+#' after a failure it keeps the current key. The server seals the change in
+#' the account's signal feed as an `account.changed` event,
+#' `request_key.rotated`, whose `request_key_approval` is the approval this
+#' call sends, under the previous public key. From then on the new key signs
+#' the owner's changes to the account's policy, settings and records. An
+#' HTTP 409 "the request key changed since this change was signed" means
+#' another change to the owner key's request key came first: the call stops
+#' with the server's message, as an `httr2_http_409` error, and the client
+#' keeps the current key.
+#'
+#' @param client A client handle from `verdifax_client()`, holding the
+#'   account's owner key as `api_key` and constructed with the current
+#'   `signing_key`.
+#' @param new_signing_key The 32 raw bytes of the new Ed25519 private key.
+#'   Anything else is refused before sending.
+#'
+#' @return Parsed API response list with `ok` and `public_key`.
+#'
+#' @export
+verdifax_rotate_account_request_key <- function(client, new_signing_key) {
+  .rotate_request_key_at(
+    client, .ACCOUNT_REQUEST_KEY_PATH, new_signing_key, "verdifax_rotate_account_request_key"
+  )
+}
+
 #' Clear the owner key's request key.
 #'
 #' Calls `DELETE /account/request-key` with the same body as
@@ -328,7 +364,12 @@ verdifax_register_account_request_key <- function(client) {
 #' holds it. After success the client drops its signing key, and so does
 #' every copy of the client. After a failure it keeps the key. Until another
 #' key is registered, the account's policy cannot be changed, because every
-#' change must be signed.
+#' change must be signed. The server seals the clear in the account's signal
+#' feed as an `account.changed` event, `request_key.cleared`, decided by
+#' `"owner"` and carrying this call's approval as `request_key_approval`. An
+#' HTTP 409 means another change to the request key came first: the call
+#' stops with the server's message, as an `httr2_http_409` error, and the
+#' client keeps the key.
 #'
 #' @inheritParams verdifax_get_account
 #'
@@ -438,9 +479,17 @@ verdifax_export_account_runs_csv <- function(client, from = NULL, to = NULL, job
 #'
 #' @return Parsed API response list with `ok`, `run_id`, `deleted` and
 #'   `run_deletion`, the sealed tombstone (`format`, `decided_by`, `run_id`,
-#'   `record_hash`, `job_id`, `step_id`, `changed_at`, `owner_signature`,
-#'   `signal`, `deletion_hash`, `anchor`). The call stops with an error
-#'   when the tombstone does not carry the `run_id`, the `record_hash`,
+#'   `record_hash`, `job_id`, `step_id`, `log_entries`, the public-log
+#'   entries of the deleted record in ascending order, so the log still
+#'   accounts for each once the record is gone, `job_links`, `changed_at`,
+#'   `owner_signature`, `signal`, `deletion_hash`, `anchor`); `job_id`,
+#'   `step_id` and `log_entries` appear where they apply. `job_links` is on
+#'   a job step deleted since round 61, and present even when empty: the
+#'   deleted step's own links, `previous_record_hashes` and
+#'   `external_previous` (lists of 64-char hex hashes, each sorted and
+#'   distinct) and `final` (`TRUE` for the job's final step), each left out
+#'   when empty or false. A tombstone written before carries none. The call stops
+#'   with an error when the tombstone does not carry the `run_id`, the `record_hash`,
 #'   `decided_by` `"owner"` and the `owner_signature` that were sent, with
 #'   `public_key` the client's request key.
 #'

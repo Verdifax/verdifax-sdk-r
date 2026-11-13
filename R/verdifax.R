@@ -587,7 +587,15 @@ verdifax_generate_request_key <- function() {
 #'
 #' Sends the public key with a proof that this client holds the
 #' private key. From then on the server refuses a run on this API key
-#' without a request signature.
+#' without a request signature. For a key in an account, the server seals
+#' the registration in the account's signal feed as an `account.changed`
+#' event, `request_key.registered`, with the public key and `decided_by`
+#' `"owner"`, in the same write as the key.
+#'
+#' An HTTP 409 "the request key changed since this change was signed"
+#' means another change to this key's request key came first. The call
+#' stops with the server's message, as an `httr2_http_409` error, and is
+#' not retried. Read the key again before trying another change.
 #'
 #' @param client A client handle from `verdifax_client()`, constructed
 #'   with `signing_key`.
@@ -604,7 +612,7 @@ verdifax_register_request_key <- function(client) {
     )
   }
   body <- .request_key_body(signer)
-  .perform(.build_request(client, .REQUEST_KEY_PATH, body))
+  .send(client, "POST", .REQUEST_KEY_PATH, body)
 }
 
 #' Replace the registered public key.
@@ -613,7 +621,13 @@ verdifax_register_request_key <- function(client) {
 #' the new public key with its proof, made by the new key, and an approval
 #' made by the current key. After success the client signs with the new
 #' key, and so does every copy of the client, such as one held by a job.
-#' After a failure it keeps the current key.
+#' After a failure it keeps the current key. For a key in an account, the
+#' server seals the change in the account's signal feed as an
+#' `account.changed` event, `request_key.rotated`, whose
+#' `request_key_approval` is the approval this call sends, under the
+#' previous public key. An HTTP 409 means another change to the request key
+#' came first: the call stops with the server's message, as an
+#' `httr2_http_409` error, and the client keeps the current key.
 #'
 #' @param client A client handle from `verdifax_client()`, constructed
 #'   with the current `signing_key`.
@@ -623,17 +637,22 @@ verdifax_register_request_key <- function(client) {
 #'
 #' @export
 verdifax_rotate_request_key <- function(client, new_signing_key) {
+  .rotate_request_key_at(client, .REQUEST_KEY_PATH, new_signing_key, "verdifax_rotate_request_key")
+}
+
+# A rotation at `path`: the new key with its proof, and the current key's
+# approval of it. The client and its copies switch to the new key only after
+# the server answers 2xx; any refusal stops with the server's message and
+# leaves the current key in place.
+.rotate_request_key_at <- function(client, path, new_signing_key, caller) {
   signer <- .active_signer(client)
   if (is.null(signer)) {
-    stop(
-      "verdifax_rotate_request_key needs a client with signing_key",
-      call. = FALSE
-    )
+    stop(caller, " needs a client with signing_key", call. = FALSE)
   }
   replacement <- .request_signer(new_signing_key)
   body <- .request_key_body(replacement)
   body$change <- .key_change(signer, body[["public_key"]])
-  result <- .send(client, "POST", .REQUEST_KEY_PATH, body)
+  result <- .send(client, "POST", path, body)
   .adopt_signer(signer, replacement)
   result
 }
@@ -646,6 +665,12 @@ verdifax_rotate_request_key <- function(client, new_signing_key) {
 #' drops its signing key and sends unsigned requests, because the server
 #' refuses a signed run on this API key, and so does every copy of the
 #' client, such as one held by a job. After a failure it keeps the key.
+#' For a key in an account, the server seals the clear in the account's
+#' signal feed as an `account.changed` event, `request_key.cleared` with an
+#' empty value, decided by `"owner"` and carrying this call's approval as
+#' `request_key_approval`. An HTTP 409 means another change to the request
+#' key came first: the call stops with the server's message, as an
+#' `httr2_http_409` error, and the client keeps the key.
 #'
 #' @param client A client handle from `verdifax_client()`.
 #'
