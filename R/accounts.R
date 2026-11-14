@@ -25,7 +25,7 @@
 .OWNER_SETTING_VALUES <- c("allowed", "blocked")
 .RUN_DELETED_CHANGE <- "run.deleted"
 .OWNER_CHANGE_UNSIGNED <- paste0(
-  "an owner setting or deletion must be signed by the owner key's request key: ",
+  "an owner setting, deletion or webhook change must be signed by the owner key's request key: ",
   "construct the client with signing_key and register it with ",
   "verdifax_register_account_request_key(), so no change was asked for"
 )
@@ -178,7 +178,8 @@ verdifax_set_account_time_zone <- function(client, time_zone) {
 #'
 #' Calls `PUT /account/settings/{setting}` with the account's owner key.
 #' `"owner-replacement"` decides whether Verdifax may replace a lost owner
-#' key, and `"verdifax-deletion"` whether Verdifax may delete the account's
+#' key and, from verifier v0.35.0's server release on, clear the owner key's
+#' request key, and `"verdifax-deletion"` whether Verdifax may delete the account's
 #' records. While a setting is `"blocked"`, the server refuses that change,
 #' and `verdifax-verify --signals` fails a feed that shows one after the
 #' block.

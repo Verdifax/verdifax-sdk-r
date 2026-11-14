@@ -1,3 +1,13 @@
+# verdifax 1.16.0
+
+## Webhook changes signed by the owner and sealed in the feed
+
+* From verifier v0.35.0's server release on, a webhook is added and removed only with its record in the account's feed: an `account.changed` event, `webhook.subscribed` or `webhook.deleted`, decided by the owner and signed by the owner key's request key over the webhook's value, `sha256=` and the SHA-256 of the address exactly as sent, then ` kinds=` and the kinds sorted and joined with commas, or `all`. The record never holds the address, which can carry a token, so Verdifax, which never holds the owner's request key, cannot add a destination for the account's events. The server refuses an address not sent in the form it stores, with a 400 naming that form.
+* `verdifax_create_webhook(client, url, types = NULL, account_id = NULL)` and `verdifax_delete_webhook(client, id, account_id = NULL)` sign the change with the client's `signing_key`, the owner key's request key, and stop before anything is sent without one. `verdifax_delete_webhook()` reads the subscription from `verdifax_list_webhooks()` and signs its value; an id the account holds no live webhook with stops before the removal is sent. Both check the record in the answer, `account_change`: it must carry the change, the value, `decided_by` owner and the signature sent, or the call stops.
+* `verdifax_webhook_value(url, types)` returns the value; it makes no request. The shared vector `sdk-webhook-change-vector.json` fixes the value for the four SDKs, the server and the verifier, and a test here reads it.
+* The owner-replacement setting's description now says that, from verifier v0.35.0's server release on, Verdifax also cannot clear the owner key's request key while the owner blocks owner-key replacement.
+* The user agent is `verdifax-r/1.16.0`.
+
 # verdifax 1.15.0
 
 ## The feed's head, and each key's request key sealed in the feed

@@ -159,9 +159,9 @@ GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 42
 | `verdifax_follow_signals()` | `GET /signals` page after page, or `GET /account/signals` with `as_owner = TRUE` |
 | `verdifax_create_feed_key()` | `POST /account/feed-keys` |
 | `verdifax_revoke_feed_key()` | `DELETE /account/feed-keys/{id}` |
-| `verdifax_create_webhook()` | `POST /account/webhooks` |
+| `verdifax_create_webhook()` | `POST /account/webhooks`, signed by the owner key's request key |
 | `verdifax_list_webhooks()` | `GET /account/webhooks` |
-| `verdifax_delete_webhook()` | `DELETE /account/webhooks/{id}` |
+| `verdifax_delete_webhook()` | `GET /account/webhooks`, then `DELETE /account/webhooks/{id}`, signed by the owner key's request key |
 | `verdifax_list_webhook_deliveries()` | `GET /account/webhooks/{id}/deliveries` |
 | `verdifax_get_failure_receipt()` | `GET /runs/{id}/failure-receipt` |
 | `verdifax_admin_create_key()` | `POST /admin/keys` |
@@ -174,7 +174,7 @@ GET, HEAD and OPTIONS requests are retried after a network failure or an HTTP 42
 | `verdifax_admin_replace_owner_key()` | `POST /admin/accounts/{id}/owner-key/replace` |
 | `verdifax_admin_delete_run()` | `POST /admin/runs/{id}/delete` |
 
-These make no request: `verdifax_client()`, `verdifax_from_env()`, `verdifax_job()`, `verdifax_capture_environment()`, `verdifax_format_provider_payload()`, `verdifax_sign_request()`, `verdifax_request_key_registration_body()`, `verdifax_request_signature_preimage()`, `verdifax_policy_activation_preimage()`, `verdifax_policy_activation_approval()`, `verdifax_owner_change_preimage()`, `verdifax_signoff_preimage()`, `verdifax_approver_key_proof()`, `verdifax_verify_webhook()`, `verdifax_signal_event_hash()`, `verdifax_generate_request_key()`, `verdifax_validate_hex64()`, `verdifax_validate_route_id()`, `verdifax_dse_dispatch_hash()`, `verdifax_dcae_closure_hash()`, `verdifax_cres_receipt_hash()` and `verdifax_run_statuses()`.
+These make no request: `verdifax_client()`, `verdifax_from_env()`, `verdifax_job()`, `verdifax_capture_environment()`, `verdifax_format_provider_payload()`, `verdifax_sign_request()`, `verdifax_request_key_registration_body()`, `verdifax_request_signature_preimage()`, `verdifax_policy_activation_preimage()`, `verdifax_policy_activation_approval()`, `verdifax_owner_change_preimage()`, `verdifax_signoff_preimage()`, `verdifax_approver_key_proof()`, `verdifax_verify_webhook()`, `verdifax_webhook_value()`, `verdifax_signal_event_hash()`, `verdifax_generate_request_key()`, `verdifax_validate_hex64()`, `verdifax_validate_route_id()`, `verdifax_dse_dispatch_hash()`, `verdifax_dcae_closure_hash()`, `verdifax_cres_receipt_hash()` and `verdifax_run_statuses()`.
 
 `verdifax_get_run_artifacts()`, `verdifax_get_public_bundle()`, `verdifax_get_public_bundle_by_token()`, `verdifax_get_policy_history()`, `verdifax_get_account_policy_history()`, `verdifax_get_signoffs()`, `verdifax_get_signoff_history()` and `verdifax_get_failure_receipt()` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
 
@@ -396,7 +396,7 @@ Every change to the account's policy must be signed by the owner key's request k
 
 ### Settings and deletions the owner decides
 
-The owner decides two settings, each `"allowed"` or `"blocked"`, which `verdifax_get_account()` returns as `owner_replacement` and `verdifax_deletion`. While `owner-replacement` is blocked, Verdifax cannot replace the account's owner key; while `verdifax-deletion` is blocked, Verdifax cannot delete the account's records. The owner can also delete one of the account's records itself.
+The owner decides two settings, each `"allowed"` or `"blocked"`, which `verdifax_get_account()` returns as `owner_replacement` and `verdifax_deletion`. While `owner-replacement` is blocked, Verdifax cannot replace the account's owner key, and from verifier v0.35.0's server release on it cannot clear the owner key's request key either; while `verdifax-deletion` is blocked, Verdifax cannot delete the account's records. The owner can also delete one of the account's records itself.
 
 ```r
 # The owner blocks both changes Verdifax could make. Each is signed by the
@@ -514,6 +514,8 @@ event$data$kind
 ```
 
 `verdifax_verify_webhook()` refuses a `webhook-timestamp` more than 300 seconds from now, in either direction, and accepts the delivery when any `v1` signature in `webhook-signature` matches, compared in constant time. A failed check stops with an error of class `verdifax_webhook_error` that says which check failed. `verdifax_list_webhooks()`, `verdifax_delete_webhook()` and `verdifax_list_webhook_deliveries()` manage the subscriptions and show each delivery's attempts.
+
+From verifier v0.35.0's server release on, a webhook is added and removed only with its record in the account's feed: an `account.changed` event, `webhook.subscribed` or `webhook.deleted`, signed by the owner's request key over `verdifax_webhook_value(url, types)`, which is `sha256=` and the SHA-256 of the address exactly as sent, then ` kinds=` and the kinds sorted and joined with commas, or `all`. The record never holds the address, which can carry a token, and Verdifax, which never holds the owner's request key, cannot add a destination for the account's events. So `verdifax_create_webhook(client, url, types = NULL, account_id = NULL)` and `verdifax_delete_webhook(client, id, account_id = NULL)` need a client made with `signing_key`, the owner key's request key, and stop before sending anything without one. Send the address exactly as the server stores it: the server refuses another form with HTTP 400 naming the stored one. `verdifax_delete_webhook()` reads the subscription from `verdifax_list_webhooks()` and signs its value. Both check the sealed record in the answer and stop if it does not carry what was sent. A new subscription receives its own record's event first, and a removed one is not sent the event that removes it. `verdifax-verify --signals` lists the subscriptions in place at the end of a feed read from its start. The shared vector `tests/testthat/sdk-webhook-change-vector.json` fixes the value for all four SDKs.
 
 `verdifax_get_failure_receipt()` returns the failure receipt of a run that failed, as the exact JSON text the server sent.
 

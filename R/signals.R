@@ -424,6 +424,49 @@ verdifax_revoke_feed_key <- function(client, id) {
 
 # ── Webhooks ────────────────────────────────────────────────────────────────
 
+#' The value a webhook change seals and the owner signs.
+#'
+#' `sha256=` and the SHA-256 of the address exactly as sent, as lowercase
+#' hex, then ` kinds=` and the kinds sorted (byte order) and joined with
+#' commas, or `all` when none are named. The record never holds the address,
+#' which can carry a token. Fixed by the shared vector
+#' `sdk-webhook-change-vector.json`. Makes no request.
+#'
+#' @param url The address, a single string.
+#' @param types Optional character vector of signal kinds; `NULL` or empty
+#'   for every kind.
+#'
+#' @return A single string.
+#'
+#' @export
+verdifax_webhook_value <- function(url, types = NULL) {
+  kinds <- if (is.null(types) || length(types) == 0) "all" else paste(sort(as.character(unlist(types)), method = "radix"), collapse = ",")
+  digest <- paste(as.character(unclass(openssl::sha256(charToRaw(enc2utf8(url))))), collapse = "")
+  paste0("sha256=", digest, " kinds=", kinds)
+}
+
+.WEBHOOK_SUBSCRIBED <- "webhook.subscribed"
+.WEBHOOK_DELETED <- "webhook.deleted"
+
+# A webhook change's answer, checked: its record must carry the change, the
+# value, decided_by owner and the owner's signature that was sent.
+.check_webhook_change <- function(result, change, value, body, signer) {
+  record <- result[["account_change"]]
+  same <- is.list(record) &&
+    identical(record[["action"]], change) &&
+    identical(record[["value"]], value) &&
+    identical(record[["decided_by"]], "owner") &&
+    .same_owner_signature(record[["owner_signature"]], body$owner_signature, signer)
+  if (!same) {
+    stop(
+      "the server returned a webhook change that does not carry the action, value, ",
+      "decided_by owner and owner_signature that were sent",
+      call. = FALSE
+    )
+  }
+  result
+}
+
 #' Subscribe a webhook to the account's signals.
 #'
 #' Calls `POST /account/webhooks`. Verdifax posts each new event of the
@@ -432,6 +475,16 @@ verdifax_revoke_feed_key <- function(client, id) {
 #' pull feed and the public log are the record. The server checks the
 #' address too, so the check here is only the first one. An account holds
 #' at most ten webhooks; one more answers HTTP 409.
+#'
+#' From verifier v0.35.0's server release on, the subscription is added only
+#' with its record in the account's feed, an `account.changed` event
+#' `webhook.subscribed` signed by the owner key's request key over
+#' `verdifax_webhook_value()`: the SHA-256 of the address, never the address,
+#' and the kinds. So the client needs `signing_key`, the owner key's request
+#' key, and nothing is sent without it. Send the address exactly as the
+#' server stores it: the server refuses another form with HTTP 400 naming
+#' the stored one. The record returned must carry what was sent, or the call
+#' stops. The new subscription receives its own record's event first.
 #'
 #' @inheritParams verdifax_get_account
 #' @param url The address to post to, a single string starting with
@@ -442,16 +495,28 @@ verdifax_revoke_feed_key <- function(client, id) {
 #'   `key.created`, `key.revoked`, `run.published`, `run.unpublished`,
 #'   `chain.gap`, `run.sealed`, `chain.interrupted`, `account.changed` and
 #'   `run.deleted`, with no repeats. `NULL` takes every kind.
+#' @param account_id Optional account label, `account-N`, that the signature
+#'   names; read from `GET /account` when not given.
 #'
 #' @return Parsed API response list with `ok`, `id`, `url`, `types`,
-#'   `created_at`, `secret` (`whsec_` and base64) and `hint`. It holds the
-#'   secret once: store it to check deliveries.
+#'   `created_at`, `secret` (`whsec_` and base64), `hint` and
+#'   `account_change`, the sealed record. It holds the secret once: store it
+#'   to check deliveries.
 #'
 #' @export
-verdifax_create_webhook <- function(client, url, types = NULL) {
+verdifax_create_webhook <- function(client, url, types = NULL, account_id = NULL) {
   body <- list(url = .webhook_url(url))
   body$types <- .webhook_types(types)
-  .send(client, "POST", .WEBHOOKS_PATH, body)
+  .check_owner_account_label(account_id)
+  signer <- .active_signer(client)
+  if (is.null(signer)) {
+    stop(.OWNER_CHANGE_UNSIGNED, call. = FALSE)
+  }
+  account <- .owner_account_label(client, account_id)
+  value <- verdifax_webhook_value(body$url, body$types)
+  body$owner_signature <- .owner_signature(signer, account, .WEBHOOK_SUBSCRIBED, value)
+  result <- .send(client, "POST", .WEBHOOKS_PATH, body)
+  .check_webhook_change(result, .WEBHOOK_SUBSCRIBED, value, body, signer)
 }
 
 #' List the account's webhooks, without their secrets.
@@ -471,16 +536,41 @@ verdifax_list_webhooks <- function(client) {
 #' Delete one of the account's webhooks.
 #'
 #' Calls `DELETE /account/webhooks/{id}`. Nothing more is posted to it. The
-#' feed is unchanged.
+#' client reads the subscription from `verdifax_list_webhooks()` and signs
+#' `webhook.deleted` over its `verdifax_webhook_value()` with the owner key's
+#' request key, so it needs `signing_key` and sends nothing without it. The
+#' removal is sealed in the account's feed, and the removed subscription is
+#' not sent that event. An id the account holds no live webhook with stops
+#' before the removal is sent; the record returned is checked as
+#' `verdifax_create_webhook()` checks it.
 #'
 #' @inheritParams verdifax_get_account
 #' @param id The webhook's `id`, a positive whole number.
+#' @param account_id Optional account label, `account-N`, that the signature
+#'   names; read from `GET /account` when not given.
 #'
-#' @return Parsed API response list with `ok`, `id` and `deleted`.
+#' @return Parsed API response list with `ok`, `id`, `deleted` and
+#'   `account_change`, the sealed record.
 #'
 #' @export
-verdifax_delete_webhook <- function(client, id) {
-  .send(client, "DELETE", paste0(.WEBHOOKS_PATH, "/", .require_id(id, "id")))
+verdifax_delete_webhook <- function(client, id, account_id = NULL) {
+  path <- paste0(.WEBHOOKS_PATH, "/", .require_id(id, "id"))
+  .check_owner_account_label(account_id)
+  signer <- .active_signer(client)
+  if (is.null(signer)) {
+    stop(.OWNER_CHANGE_UNSIGNED, call. = FALSE)
+  }
+  hooks <- verdifax_list_webhooks(client)$webhooks
+  hook <- NULL
+  for (h in hooks) if (identical(as.numeric(h$id), as.numeric(id))) hook <- h
+  if (is.null(hook)) {
+    stop(sprintf("the account holds no webhook %s", format(id, scientific = FALSE)), call. = FALSE)
+  }
+  account <- .owner_account_label(client, account_id)
+  value <- verdifax_webhook_value(hook$url, unlist(hook$types))
+  body <- list(owner_signature = .owner_signature(signer, account, .WEBHOOK_DELETED, value))
+  result <- .send(client, "DELETE", path, body)
+  .check_webhook_change(result, .WEBHOOK_DELETED, value, body, signer)
 }
 
 #' The delivery log of one of the account's webhooks.

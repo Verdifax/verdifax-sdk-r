@@ -508,10 +508,11 @@ test_that("a blocked admin change stops with the server's 409 message", {
 test_that("account.changed and run.deleted are signal kinds a webhook takes", {
   expect_true(all(c("account.changed", "run.deleted") %in% verdifax:::.SIGNAL_KINDS))
   sent <- capture(
-    verdifax_create_webhook(owner_client(), "https://hooks.example.com/v", types = c("account.changed", "run.deleted")),
-    function(req) json_response("{\"ok\":true}")
+    verdifax_create_webhook(webhook_owner_client(), "https://hooks.example.com/v", types = c("account.changed", "run.deleted"),
+      account_id = "account-7"),
+    webhook_sealing_server()
   )
-  expect_identical(sent[[1]]$json, "{\"url\":\"https://hooks.example.com/v\",\"types\":[\"account.changed\",\"run.deleted\"]}")
+  expect_true(startsWith(sent[[1]]$json, "{\"url\":\"https://hooks.example.com/v\",\"types\":[\"account.changed\",\"run.deleted\"],\"owner_signature\":"))
 })
 
 # Where the server's source is present, as in the Verdifax workspace, the

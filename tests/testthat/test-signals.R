@@ -835,28 +835,23 @@ test_that("revoke_feed_key calls DELETE /account/feed-keys/{id} and passes on a 
 
 test_that("create_webhook posts the url and types, always as a JSON array", {
   sent <- capture({
-    result <- verdifax_create_webhook(owner_client(), "https://hooks.example.com/verdifax",
-      types = c("run.refused", "run.halted"))
-    verdifax_create_webhook(owner_client(), "https://hooks.example.com/verdifax", types = "run.failed")
-    verdifax_create_webhook(owner_client(), "https://hooks.example.com/verdifax")
-    verdifax_create_webhook(owner_client(), "https://hooks.example.com/verdifax", types = character(0))
-    verdifax_create_webhook(owner_client(), "https://hooks.example.com/verdifax", types = .kinds)
-  })
+    result <- verdifax_create_webhook(webhook_owner_client(), "https://hooks.example.com/verdifax",
+      types = c("run.refused", "run.halted"), account_id = "account-7")
+    verdifax_create_webhook(webhook_owner_client(), "https://hooks.example.com/verdifax", types = "run.failed", account_id = "account-7")
+    verdifax_create_webhook(webhook_owner_client(), "https://hooks.example.com/verdifax", account_id = "account-7")
+    verdifax_create_webhook(webhook_owner_client(), "https://hooks.example.com/verdifax", types = character(0), account_id = "account-7")
+    verdifax_create_webhook(webhook_owner_client(), "https://hooks.example.com/verdifax", types = .kinds, account_id = "account-7")
+  }, webhook_sealing_server())
   expect_equal(sent[[1]]$method, "POST")
   expect_equal(sent[[1]]$path, "/account/webhooks")
   expect_equal(sent[[1]]$key, "owner")
-  expect_equal(
-    sent[[1]]$json,
-    "{\"url\":\"https://hooks.example.com/verdifax\",\"types\":[\"run.refused\",\"run.halted\"]}"
-  )
-  expect_equal(
-    sent[[2]]$json,
-    "{\"url\":\"https://hooks.example.com/verdifax\",\"types\":[\"run.failed\"]}"
-  )
-  expect_equal(sent[[3]]$json, "{\"url\":\"https://hooks.example.com/verdifax\"}")
-  expect_equal(sent[[4]]$json, sent[[3]]$json)
+  expect_true(startsWith(sent[[1]]$json,
+    "{\"url\":\"https://hooks.example.com/verdifax\",\"types\":[\"run.refused\",\"run.halted\"],\"owner_signature\":"))
+  expect_true(startsWith(sent[[2]]$json, "{\"url\":\"https://hooks.example.com/verdifax\",\"types\":[\"run.failed\"],\"owner_signature\":"))
+  expect_true(startsWith(sent[[3]]$json, "{\"url\":\"https://hooks.example.com/verdifax\",\"owner_signature\":"))
+  expect_equal(names(sent[[4]]$body), names(sent[[3]]$body))
   expect_equal(unlist(sent[[5]]$body$types), .kinds)
-  expect_equal(result, parsed(.webhook_reply))
+  expect_equal(result$account_change$action, "webhook.subscribed")
   expect_match(result$secret, "^whsec_")
 })
 
@@ -888,7 +883,7 @@ test_that("create_webhook passes on the server's 400, 409 and 503", {
   )) {
     respond <- function(req) json_response(to_json(list(ok = FALSE, error = case[[2]])), case[[1]])
     sent <- capture(expect_error(
-      verdifax_create_webhook(owner_client(), "https://hooks.example.com"),
+      verdifax_create_webhook(webhook_owner_client(), "https://hooks.example.com", account_id = "account-7"),
       case[[2]], fixed = TRUE, class = paste0("httr2_http_", case[[1]])
     ), respond)
     expect_length(sent, 1)
@@ -905,13 +900,13 @@ test_that("list_webhooks calls GET /account/webhooks", {
 })
 
 test_that("delete_webhook calls DELETE /account/webhooks/{id}", {
-  sent <- capture(result <- verdifax_delete_webhook(owner_client(), 4))
-  expect_equal(sent[[1]]$method, "DELETE")
-  expect_equal(sent[[1]]$path, "/account/webhooks/4")
-  expect_null(sent[[1]]$body)
-  expect_equal(result, list(ok = TRUE, id = 4L, deleted = TRUE))
+  sent <- capture(result <- verdifax_delete_webhook(webhook_owner_client(), 3, account_id = "account-7"), webhook_sealing_server())
+  expect_equal(sent[[2]]$method, "DELETE")
+  expect_equal(sent[[2]]$path, "/account/webhooks/3")
+  expect_equal(names(sent[[2]]$body), "owner_signature")
+  expect_true(result$deleted)
   sent <- capture(for (id in list(0, -1, 1.5, NA, Inf, "3", c(1, 2), TRUE, NULL)) {
-    expect_error(verdifax_delete_webhook(owner_client(), id), "id must be a positive whole number")
+    expect_error(verdifax_delete_webhook(webhook_owner_client(), id), "id must be a positive whole number")
   })
   expect_length(sent, 0)
 })
